@@ -16,13 +16,13 @@ export CHECKPOINT_ENDPOINT="$SCRIPT_DIR/results"
 
 export REPETITIONS="1"
 
-export RECORD=1
-export RECORD_CONTROL=1
+export RECORD=
+export RECORD_CONTROL=
 export RESUME=
 
 export QUALIFIER=
 export EVALUATION=
-export DEVELOPMENT=
+export DEVELOPMENT=1
 
 export SEED=0
 
