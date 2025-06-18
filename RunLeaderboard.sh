@@ -7,7 +7,7 @@ export TEAM_CODE_ROOT="$SCRIPT_DIR/agents"
 
 export PYTHONPATH="$LEADERBOARD_ROOT:$TEAM_CODE_ROOT:$PYTHONPATH"
 
-export TEAM_AGENT="$SCRIPT_DIR/human_agent.py"
+export TEAM_AGENT="$SCRIPT_DIR/raft.py"
 
 export MISSIONS="$LEADERBOARD_ROOT/data/missions_training.xml"
 export MISSIONS_SUBSET="0"
