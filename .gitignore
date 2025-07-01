@@ -226,3 +226,7 @@ credentials.json
 # Generated documentation
 docs/_build/
 *.pdf
+
+# Data collection
+data_collection/
+plan.md
