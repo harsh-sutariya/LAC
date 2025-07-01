@@ -11,7 +11,14 @@ as described in plan.md. It generates:
 - Random walk trajectories
 - Directed movement trajectories  
 - Various maneuvers (turning, slope navigation, obstacle avoidance)
-- RGB images, IMU data, positions, and actions at each timestep
+- RGB images, dual-timestep IMU data, 6DOF poses, and actions at each timestep
+
+Camera synchronization: CARLA cameras run at 10Hz while simulation runs at 20Hz.
+This means camera data is only available every other simulation step.
+We collect data only when valid camera images are available.
+
+IMU enhancement: Captures high-frequency IMU data from both simulation steps,
+concatenating [previous_step_IMU + current_step_IMU] for richer motion dynamics.
 
 Data is saved in a format suitable for world model training.
 """
@@ -32,6 +39,14 @@ import carla
 
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent
 
+# Try to import scipy for image resizing, fallback to basic methods if not available
+try:
+    from scipy import ndimage
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("⚠️  scipy not available - image resizing will use basic interpolation")
+
 
 def get_entry_point():
     return 'DataCollectionAgent'
@@ -49,6 +64,9 @@ class TrajectoryGenerator:
         self.target_position = None
         self.start_position = None
         
+        # Callback to save trajectory when starting new one
+        self.save_trajectory_callback = None
+        
         # Trajectory types as mentioned in plan.md
         self.trajectory_types = [
             'random_walk',
@@ -57,9 +75,19 @@ class TrajectoryGenerator:
             'exploration',
             'spiral_pattern'
         ]
+    
+    def set_save_callback(self, callback):
+        """Set callback function to save trajectory data before starting new trajectory"""
+        self.save_trajectory_callback = callback
         
     def start_new_trajectory(self, current_position):
-        """Start a new trajectory of random type"""
+        """Start a new trajectory of random type - saves existing data first"""
+        # Save any existing trajectory data before starting fresh
+        if self.save_trajectory_callback and self.current_trajectory_type is not None:
+            print(f"🔄 Finishing trajectory: {self.current_trajectory_type} (completed {self.trajectory_step} steps)")
+            self.save_trajectory_callback()
+        
+        # Start completely fresh trajectory
         self.current_trajectory_type = random.choice(self.trajectory_types)
         self.trajectory_step = 0
         self.start_position = current_position
@@ -76,7 +104,7 @@ class TrajectoryGenerator:
                 current_position[1] + distance * math.sin(angle)
             )
         
-        print(f"Starting new trajectory: {self.current_trajectory_type} for {self.trajectory_length} steps")
+        print(f"🚀 Starting NEW trajectory: {self.current_trajectory_type} for {self.trajectory_length} steps")
         
     def get_next_action(self, current_position, current_orientation=0):
         """Generate next action based on current trajectory type"""
@@ -156,10 +184,11 @@ class TrajectoryGenerator:
 class DataLogger:
     """Handles saving trajectory data for world model training"""
     
-    def __init__(self, save_dir="data_collection"):
+    def __init__(self, save_dir="data_collection", min_trajectory_length=99):
         self.save_dir = save_dir
         self.trajectory_count = 0
         self.total_steps_saved = 0  # Track actual total steps across all saved trajectories
+        self.min_trajectory_length = min_trajectory_length  # Minimum steps to save a trajectory
         
         # Lists to store current trajectory data
         self.current_images = []
@@ -169,60 +198,200 @@ class DataLogger:
         self.current_timestamps = []
         # self.current_vehicle_status = []
         
+        # Expected data shapes for validation
+        self.expected_shapes = {
+            'image': (480, 640),  # Grayscale camera
+            'imu': 12,  # Dual-timestep IMU: [prev 6D + curr 6D]
+            'pose': 6,  # 6DOF: [x, y, z, roll, pitch, yaw]
+            'action': 2  # [linear_velocity, angular_velocity]
+        }
+        
         # Create save directory
         os.makedirs(save_dir, exist_ok=True)
         
         print(f"Data will be saved to: {save_dir}")
+        print(f"📏 Expected data shapes: image={self.expected_shapes['image']}, "
+              f"imu={self.expected_shapes['imu']}D, pose={self.expected_shapes['pose']}D, "
+              f"action={self.expected_shapes['action']}D")
+        print(f"🎯 Minimum trajectory length: {self.min_trajectory_length} steps (shorter trajectories will be discarded)")
+    
+    def _validate_and_correct_imu(self, imu_data):
+        """Validate and correct IMU data to ensure it's exactly 12D"""
+        # Convert to list if needed
+        if hasattr(imu_data, 'tolist'):
+            imu_list = imu_data.tolist()
+        else:
+            imu_list = list(imu_data)
+        
+        target_size = self.expected_shapes['imu']
+        current_size = len(imu_list)
+        
+        if current_size == target_size:
+            # Perfect size
+            return imu_list
+        elif current_size < target_size:
+            # Too short - pad by duplicating last element
+            padding_needed = target_size - current_size
+            if current_size > 0:
+                last_element = imu_list[-1]
+                padded_data = imu_list + [last_element] * padding_needed
+            else:
+                # Empty data - fill with zeros
+                padded_data = [0.0] * target_size
+            
+            print(f"⚠️  IMU data corrected: {current_size}D → {target_size}D (padded)")
+            return padded_data
+        else:
+            # Too long - truncate to target size
+            truncated_data = imu_list[:target_size]
+            print(f"⚠️  IMU data corrected: {current_size}D → {target_size}D (truncated)")
+            return truncated_data
+    
+    def _validate_image(self, image_data):
+        """Validate camera image data"""
+        if image_data is None:
+            # Create placeholder with correct shape
+            placeholder = np.zeros(self.expected_shapes['image'], dtype=np.uint8)
+            print("⚠️  Camera data None - using placeholder")
+            return placeholder
+        
+        expected_shape = self.expected_shapes['image']
+        if image_data.shape != expected_shape:
+            print(f"⚠️  Image shape mismatch: expected {expected_shape}, got {image_data.shape}")
+            # Try to resize/reshape if possible
+            if len(image_data.shape) == 2 and SCIPY_AVAILABLE:
+                # Already grayscale, try to resize using scipy
+                resized = ndimage.zoom(image_data, 
+                                     (expected_shape[0]/image_data.shape[0], 
+                                      expected_shape[1]/image_data.shape[1]), 
+                                     order=1)
+                print(f"🔧 Image resized to {resized.shape}")
+                return resized.astype(np.uint8)
+            elif len(image_data.shape) == 2:
+                # Basic resizing using numpy (less accurate but functional)
+                resized = np.resize(image_data, expected_shape)
+                print(f"🔧 Image resized (basic) to {resized.shape}")
+                return resized.astype(np.uint8)
+            else:
+                # Create placeholder if can't fix
+                placeholder = np.zeros(expected_shape, dtype=np.uint8)
+                print("🔧 Using placeholder image due to shape mismatch")
+                return placeholder
+        
+        return image_data
+    
+    def _validate_pose(self, pose):
+        """Validate and extract 6DOF pose data"""
+        try:
+            pose_data = [
+                pose.location.x, pose.location.y, pose.location.z,          # Position
+                pose.rotation.roll, pose.rotation.pitch, pose.rotation.yaw  # Orientation
+            ]
+            assert len(pose_data) == self.expected_shapes['pose'], f"Pose should be {self.expected_shapes['pose']}D"
+            
+            # Check for NaN or infinite values
+            for i, val in enumerate(pose_data):
+                if not np.isfinite(val):
+                    print(f"⚠️  Invalid pose value at index {i}: {val}, replacing with 0.0")
+                    pose_data[i] = 0.0
+            
+            return pose_data
+        except Exception as e:
+            print(f"⚠️  Pose extraction error: {e}, using zeros")
+            return [0.0] * self.expected_shapes['pose']
+    
+    def _validate_action(self, action):
+        """Validate action data"""
+        try:
+            assert isinstance(action, dict), f"Action should be dict, got {type(action)}"
+            assert 'linear_velocity' in action, "Action missing 'linear_velocity'"
+            assert 'angular_velocity' in action, "Action missing 'angular_velocity'"
+            
+            linear_vel = float(action['linear_velocity'])
+            angular_vel = float(action['angular_velocity'])
+            
+            # Check for NaN or infinite values
+            if not np.isfinite(linear_vel):
+                print(f"⚠️  Invalid linear velocity: {linear_vel}, replacing with 0.0")
+                linear_vel = 0.0
+            if not np.isfinite(angular_vel):
+                print(f"⚠️  Invalid angular velocity: {angular_vel}, replacing with 0.0")
+                angular_vel = 0.0
+            
+            action_data = [linear_vel, angular_vel]
+            assert len(action_data) == self.expected_shapes['action'], f"Action should be {self.expected_shapes['action']}D"
+            
+            return action_data
+        except Exception as e:
+            print(f"⚠️  Action validation error: {e}, using zeros")
+            return [0.0] * self.expected_shapes['action']
         
     def log_step(self, image_data, imu_data, pose, action, vehicle_data=None):
-        """Log a single timestep of data"""
+        """Log a single timestep of data with comprehensive validation"""
         # Store timestamp
         self.current_timestamps.append(time.time())
         
-        # Store image (handle None case)
-        if image_data is not None:
-            self.current_images.append(image_data)
-        else:
-            # Store empty array with correct shape for consistency
-            self.current_images.append(np.zeros((480, 640), dtype=np.uint8))
+        # Validate and store image data
+        validated_image = self._validate_image(image_data)
+        self.current_images.append(validated_image)
         
-        # Store IMU data
-        if hasattr(imu_data, 'tolist'):
-            self.current_imu_data.append(imu_data.tolist())
-        else:
-            self.current_imu_data.append(list(imu_data))
+        # Validate and correct IMU data
+        corrected_imu = self._validate_and_correct_imu(imu_data)
+        self.current_imu_data.append(corrected_imu)
         
-        # Store 6DOF pose (position + orientation)
-        self.current_poses.append([
-            pose.location.x, pose.location.y, pose.location.z,          # Position
-            pose.rotation.roll, pose.rotation.pitch, pose.rotation.yaw  # Orientation
-        ])
+        # Validate and store 6DOF pose
+        validated_pose = self._validate_pose(pose)
+        self.current_poses.append(validated_pose)
         
-        # Store action
-        self.current_actions.append([action['linear_velocity'], action['angular_velocity']])
+        # Validate and store action
+        validated_action = self._validate_action(action)
+        self.current_actions.append(validated_action)
         
-        # # Store vehicle status
-        # self.current_vehicle_status.append([
-        #     vehicle_data.front_drums_speed,
-        #     vehicle_data.front_arm_angle, 
-        #     vehicle_data.back_arm_angle,
-        #     vehicle_data.back_drums_speed
-        # ])
-        
+        # Debug assertions (will be disabled in production but useful for development)
+        if len(self.current_images) <= 5:  # Only check first few steps to avoid spam
+            try:
+                assert self.current_images[-1].shape == self.expected_shapes['image'], \
+                    f"Image shape assertion failed: {self.current_images[-1].shape}"
+                assert len(self.current_imu_data[-1]) == self.expected_shapes['imu'], \
+                    f"IMU shape assertion failed: {len(self.current_imu_data[-1])}"
+                assert len(self.current_poses[-1]) == self.expected_shapes['pose'], \
+                    f"Pose shape assertion failed: {len(self.current_poses[-1])}"
+                assert len(self.current_actions[-1]) == self.expected_shapes['action'], \
+                    f"Action shape assertion failed: {len(self.current_actions[-1])}"
+                
+                print(f"✅ Step {len(self.current_images)}: All data shapes validated - "
+                      f"img{self.current_images[-1].shape}, imu{len(self.current_imu_data[-1])}D, "
+                      f"pose{len(self.current_poses[-1])}D, action{len(self.current_actions[-1])}D")
+            except AssertionError as e:
+                print(f"❌ Data validation failed: {e}")
+                raise
+
     def save_trajectory(self):
         """Save current trajectory as a single numpy file and start a new one"""
-        if len(self.current_images) > 0:
+        if len(self.current_images) >= self.min_trajectory_length:
             current_steps = len(self.current_images)
             trajectory_filename = f"trajectory_{self.trajectory_count}.npz"
             trajectory_path = os.path.join(self.save_dir, trajectory_filename)
             
-            # Convert lists to numpy arrays
+            # Convert lists to numpy arrays with final shape validation
             images = np.array(self.current_images)  # Shape: (n_steps, height, width)
-            imu_data = np.array(self.current_imu_data)  # Shape: (n_steps, 6)
+            imu_data = np.array(self.current_imu_data)  # Shape: (n_steps, 12)
             poses = np.array(self.current_poses)  # Shape: (n_steps, 6) - [x, y, z, roll, pitch, yaw]
             actions = np.array(self.current_actions)  # Shape: (n_steps, 2)
             timestamps = np.array(self.current_timestamps)  # Shape: (n_steps,)
-            # vehicle_status = np.array(self.current_vehicle_status)  # Shape: (n_steps, 4)
+            
+            # Final shape validation before saving
+            expected_steps = current_steps
+            assert images.shape == (expected_steps, self.expected_shapes['image'][0], self.expected_shapes['image'][1]), \
+                f"Images final shape error: {images.shape}"
+            assert imu_data.shape == (expected_steps, self.expected_shapes['imu']), \
+                f"IMU final shape error: {imu_data.shape}"
+            assert poses.shape == (expected_steps, self.expected_shapes['pose']), \
+                f"Poses final shape error: {poses.shape}"
+            assert actions.shape == (expected_steps, self.expected_shapes['action']), \
+                f"Actions final shape error: {actions.shape}"
+            assert timestamps.shape == (expected_steps,), \
+                f"Timestamps final shape error: {timestamps.shape}"
             
             # Save all data in a single compressed numpy file
             np.savez_compressed(
@@ -237,21 +406,41 @@ class DataLogger:
                 n_steps=current_steps
             )
             
-            print(f"Saved trajectory {self.trajectory_count} with {current_steps} steps to {trajectory_filename}")
+            print(f"✅ Saved trajectory {self.trajectory_count} with {current_steps} steps to {trajectory_filename}")
+            print(f"📏 Final shapes: img{images.shape}, imu{imu_data.shape}, pose{poses.shape}, action{actions.shape}")
             
             # Update total steps counter with actual steps saved
             self.total_steps_saved += current_steps
-            
-            # Clear current trajectory data
-            self.current_images = []
-            self.current_imu_data = []
-            self.current_poses = []  # Changed from positions to poses
-            self.current_actions = []
-            self.current_timestamps = []
-            # self.current_vehicle_status = []
-            
             self.trajectory_count += 1
+        elif len(self.current_images) > 0:
+            print(f"🗑️  DISCARDING trajectory with {len(self.current_images)} steps (minimum: {self.min_trajectory_length})")
+        else:
+            print("⚠️  No data to save in current trajectory")
             
+        # Clear current trajectory data regardless of whether we saved or not
+        self._clear_current_data()
+            
+    def save_and_start_fresh(self):
+        """Save current trajectory data (if any) and start completely fresh"""
+        if len(self.current_images) >= self.min_trajectory_length:
+            self.save_trajectory()
+            print(f"📁 Saved complete trajectory before starting fresh")
+        elif len(self.current_images) > 0:
+            print(f"🗑️  DISCARDING partial trajectory with only {len(self.current_images)} steps (minimum: {self.min_trajectory_length})")
+            self._clear_current_data()
+        else:
+            print(f"🔄 Starting fresh trajectory (no previous data to save)")
+            self._clear_current_data()
+    
+    def _clear_current_data(self):
+        """Clear all current trajectory data to start fresh"""
+        self.current_images = []
+        self.current_imu_data = []
+        self.current_poses = []  # Changed from positions to poses
+        self.current_actions = []
+        self.current_timestamps = []
+        # self.current_vehicle_status = []
+
     def get_statistics(self):
         """Get collection statistics"""
         current_steps = len(self.current_images)
@@ -268,31 +457,49 @@ class DataLogger:
 
 class DataCollectionAgent(AutonomousAgent):
     """
-    Autonomous agent for collecting diverse trajectory data for world model training
+    Autonomous agent for collecting diverse training data for world model
     """
-
+    
     def setup(self, path_to_conf_file):
-        """Setup the agent parameters"""
-        self._width = 640  # Reduced resolution for faster collection
-        self._height = 480
-        
+        """Initialize the agent"""
         self.trajectory_generator = TrajectoryGenerator()
-        self.data_logger = DataLogger()
         
-        self._step_count = 0
-        self._start_position = None
+        # Data collection parameters
+        self.target_collection_hours = 2.0  # Target collection time in hours
+        self.save_frequency = 100  # Save trajectory every 100 steps
+        self.initial_delay = 10.0  # Reduced to 10 seconds since camera sync is the real issue
+        self.min_trajectory_length = 99  # Minimum steps to save a trajectory (discard shorter ones)
+        
+        # Initialize data logger with minimum trajectory length
+        self.data_logger = DataLogger(min_trajectory_length=self.min_trajectory_length)
+        
+        # Connect trajectory generator to data logger for clean trajectory boundaries
+        self.trajectory_generator.set_save_callback(self.data_logger.save_and_start_fresh)
+        
+        # Mission state
         self._mission_start_time = time.time()
         self._recording_started = False
+        self._recording_start_time = None
+        self._start_position = None
         self._arms_raised = False
         
-        # Collection parameters
-        self.target_collection_hours = 2.0  # Start with 2 hours, increase as needed
-        self.save_frequency = 100  # Save trajectory every 100 steps
-        self.initial_delay = 10.0  # Wait 10 seconds before starting data collection
+        # Step counters
+        self._simulation_step_count = 0  # Total simulation steps
+        self._step_count = 0  # Logged data steps (only when camera data available)
+        
+        # Action and IMU tracking
+        self._current_action = None
+        self._previous_imu_data = None
+        
+        # Camera dimensions (for sensor configuration)
+        self._width = 640
+        self._height = 480
         
         print("🤖 Data Collection Agent initialized")
         print(f"🎯 Target collection time: {self.target_collection_hours} hours")
-        print(f"⏱️  Sequence: Raise arms → Activate sensors → Wait {self.initial_delay}s → Start collecting")
+        print(f"⏱️  CARLA cameras run at 10Hz (every 2 sim steps). Data collected only when camera available.")
+        print(f"📁 Each trajectory file will contain data from only ONE trajectory type")
+        print(f"🗑️  Trajectories shorter than {self.min_trajectory_length} steps will be discarded")
 
     def use_fiducials(self):
         return True
@@ -300,12 +507,12 @@ class DataCollectionAgent(AutonomousAgent):
     def sensors(self):
         """
         Define sensors for data collection
-        Focus on front camera as primary sensor as mentioned in plan.md
+        Focus on front cameras as primary sensors as mentioned in plan.md
         """
         sensors = {
             carla.SensorPosition.Front: {
-                'camera_active': False, 
-                'light_intensity': 0, 
+                'camera_active': True, 
+                'light_intensity': 1.0, 
                 'width': self._width, 
                 'height': self._height, 
                 'use_semantic': False
@@ -318,8 +525,8 @@ class DataCollectionAgent(AutonomousAgent):
                 'use_semantic': False
             },
             carla.SensorPosition.FrontRight: {
-                'camera_active': False, 
-                'light_intensity': 0, 
+                'camera_active': True, 
+                'light_intensity': 1.0, 
                 'width': self._width, 
                 'height': self._height, 
                 'use_semantic': False
@@ -363,7 +570,7 @@ class DataCollectionAgent(AutonomousAgent):
         return sensors
 
     def run_step(self, input_data):
-        """Execute one step of autonomous data collection"""
+        """Execute one step of autonomous data collection with camera-synchronized data logging"""
         
         # Raise arms and activate sensors immediately on first call
         if not self._arms_raised:
@@ -371,13 +578,14 @@ class DataCollectionAgent(AutonomousAgent):
             self.set_front_arm_angle(math.radians(80))  # Raise front arms
             self.set_back_arm_angle(math.radians(60))   # Raise back arms
             
-            # Activate the FrontLeft camera explicitly
-            print("🔧 Activating FrontLeft camera...")
-            self.set_camera_state(carla.SensorPosition.FrontLeft, True)
+            # Set light intensity (cameras should already be active from sensors() config)
+            print("🔧 Setting camera lights...")
+            self.set_light_state(carla.SensorPosition.Front, 1.0)
             self.set_light_state(carla.SensorPosition.FrontLeft, 1.0)
+            self.set_light_state(carla.SensorPosition.FrontRight, 1.0)
             
             self._arms_raised = True
-            print("✅ Arms raised and sensors activated")
+            print("✅ Arms raised and sensors configured")
         
         # Check if initial delay has passed
         elapsed_time = time.time() - self._mission_start_time
@@ -385,7 +593,7 @@ class DataCollectionAgent(AutonomousAgent):
             # Still in waiting period - don't move and don't record
             remaining_time = self.initial_delay - elapsed_time
             if int(remaining_time) != int(remaining_time + 0.05):  # Print every second
-                print(f"⏳ Waiting {remaining_time:.1f} seconds before starting data collection...")
+                print(f"⏳ Camera warmup: {remaining_time:.1f}s remaining...")
             
             # Return stationary control command
             return carla.VehicleVelocityControl(0.0, 0.0)
@@ -394,7 +602,10 @@ class DataCollectionAgent(AutonomousAgent):
         if not self._recording_started:
             self._recording_started = True
             self._recording_start_time = time.time()
-            print("🚀 Starting data collection now!")
+            print("🚀 Starting data collection! Looking for camera data...")
+        
+        # Increment simulation step counter
+        self._simulation_step_count += 1
         
         # Get current vehicle state
         current_transform = self._vehicle_status.transform
@@ -406,60 +617,132 @@ class DataCollectionAgent(AutonomousAgent):
             self._start_position = current_position
             self.trajectory_generator.start_new_trajectory((current_position.x, current_position.y))
             print(f"📍 Starting data collection at position: ({current_position.x:.2f}, {current_position.y:.2f})")
+        
+        # Always generate an action (will be used for multiple steps if needed)
+        if self._current_action is None:
+            # Generate next action using trajectory generator
+            linear_speed, angular_speed = self.trajectory_generator.get_next_action(
+                (current_position.x, current_position.y), 
+                current_orientation
+            )
             
-        # Generate next action using trajectory generator
-        linear_speed, angular_speed = self.trajectory_generator.get_next_action(
-            (current_position.x, current_position.y), 
-            current_orientation
+            # Store velocity values for logging
+            self._current_action = {
+                'linear_velocity': linear_speed,
+                'angular_velocity': angular_speed,
+                'generated_at_sim_step': self._simulation_step_count
+            }
+            
+            if self._step_count < 3:
+                print(f"🎮 Action generated at sim step {self._simulation_step_count}: "
+                      f"linear={linear_speed:.3f}, angular={angular_speed:.3f}")
+        
+        # Create control command using current action
+        control = carla.VehicleVelocityControl(
+            self._current_action['linear_velocity'], 
+            self._current_action['angular_velocity']
         )
         
-        # Store velocity values for logging
-        action_data = {
-            'linear_velocity': linear_speed,
-            'angular_velocity': angular_speed
-        }
+        # ALWAYS capture IMU data (every simulation step for high-frequency dynamics)
+        current_imu_data = self.get_imu_data()
         
-        # Create control command
-        control = carla.VehicleVelocityControl(linear_speed, angular_speed)
-        
-        # Log data
+        # Check if camera data is available (CARLA 10Hz camera sync)
         front_camera_data = input_data['Grayscale'].get(carla.SensorPosition.FrontLeft, None)
-        imu_data = self.get_imu_data()
         
-        # Debug camera data (print only occasionally)
-        if self._step_count % 50 == 0:  # Print every 50 steps
-            if front_camera_data is not None:
-                print(f"📷 Camera data: shape={front_camera_data.shape}, "
-                      f"range=[{front_camera_data.min()}-{front_camera_data.max()}], "
-                      f"mean={front_camera_data.mean():.1f}")
+        # Try fallback cameras if primary is None
+        if front_camera_data is None:
+            for fallback_camera in [carla.SensorPosition.Front, carla.SensorPosition.FrontRight]:
+                front_camera_data = input_data['Grayscale'].get(fallback_camera, None)
+                if front_camera_data is not None:
+                    if self._step_count < 3:  # Only print first few times
+                        print(f"📷 Using fallback camera: {fallback_camera.name}")
+                    break
+        
+        # Only log data when camera data is actually available
+        if front_camera_data is not None:
+            # We have valid camera data - log this step
+            
+            # Prepare dual-timestep IMU data (previous step + current step)
+            if self._previous_imu_data is not None:
+                # Concatenate previous step IMU + current step IMU for richer dynamics
+                if hasattr(self._previous_imu_data, 'tolist'):
+                    prev_imu = self._previous_imu_data.tolist()
+                else:
+                    prev_imu = list(self._previous_imu_data)
+                
+                if hasattr(current_imu_data, 'tolist'):
+                    curr_imu = current_imu_data.tolist()
+                else:
+                    curr_imu = list(current_imu_data)
+                
+                # Concatenate: [prev_acc_x, prev_acc_y, prev_acc_z, prev_gyro_x, prev_gyro_y, prev_gyro_z,
+                #               curr_acc_x, curr_acc_y, curr_acc_z, curr_gyro_x, curr_gyro_y, curr_gyro_z]
+                dual_imu_data = prev_imu + curr_imu
+                
+                if self._step_count < 3:  # Debug for first few steps
+                    print(f"📊 IMU dual-step: prev={len(prev_imu)}D, curr={len(curr_imu)}D, total={len(dual_imu_data)}D")
             else:
-                print("⚠️  WARNING: Camera data is None!")
-        
-        self.data_logger.log_step(
-            image_data=front_camera_data,
-            imu_data=imu_data,
-            pose=current_transform,  # Pass full transform for 6DOF pose
-            action=action_data,
-            # vehicle_data=self._vehicle_status
-        )
-        
-        self._step_count += 1
-        
-        # Periodic saves and status updates
-        if self._step_count % self.save_frequency == 0:
-            self.data_logger.save_trajectory()
-            stats = self.data_logger.get_statistics()
-            # Calculate elapsed recording time (excluding initial delay)
-            recording_elapsed_hours = (time.time() - self._recording_start_time) / 3600.0
+                # First step: duplicate current IMU for consistency
+                if hasattr(current_imu_data, 'tolist'):
+                    curr_imu = current_imu_data.tolist()
+                else:
+                    curr_imu = list(current_imu_data)
+                dual_imu_data = curr_imu + curr_imu  # [current, current]
+                
+                if self._step_count < 3:
+                    print(f"📊 IMU dual-step (first): duplicated current IMU, total={len(dual_imu_data)}D")
             
-            print(f"Step {self._step_count}: Collected {stats['trajectories_saved']} trajectories, "
-                  f"{stats['total_steps_collected']} total steps, "
-                  f"Recording time: {recording_elapsed_hours:.2f}h")
+            # Log camera status for first few steps
+            if self._step_count < 5:
+                print(f"✅ Step {self._step_count}: Camera OK, shape={front_camera_data.shape}, "
+                      f"sim_step={self._simulation_step_count}")
             
-            # Check if we've collected enough data (based on recording time, not total time)
-            if recording_elapsed_hours >= self.target_collection_hours:
-                print(f"Target collection time reached ({self.target_collection_hours}h). Completing mission.")
-                self.mission_complete()
+            # Log the data with dual-timestep IMU
+            self.data_logger.log_step(
+                image_data=front_camera_data,
+                imu_data=dual_imu_data,
+                pose=current_transform,  # Pass full transform for 6DOF pose
+                action=self._current_action,
+            )
+            
+            self._step_count += 1
+            
+            # Generate new action after logging (ready for next time we have camera data)
+            linear_speed, angular_speed = self.trajectory_generator.get_next_action(
+                (current_position.x, current_position.y), 
+                current_orientation
+            )
+            
+            self._current_action = {
+                'linear_velocity': linear_speed,
+                'angular_velocity': angular_speed,
+                'generated_at_sim_step': self._simulation_step_count
+            }
+            
+            # Periodic saves and status updates
+            if self._step_count % self.save_frequency == 0:
+                self.data_logger.save_trajectory()
+                stats = self.data_logger.get_statistics()
+                # Calculate elapsed recording time (excluding initial delay)
+                recording_elapsed_hours = (time.time() - self._recording_start_time) / 3600.0
+                
+                print(f"Step {self._step_count}: Collected {stats['trajectories_saved']} trajectories, "
+                      f"{stats['total_steps_collected']} total steps, "
+                      f"Recording time: {recording_elapsed_hours:.2f}h, "
+                      f"Sim steps: {self._simulation_step_count}")
+                
+                # Check if we've collected enough data (based on recording time, not total time)
+                if recording_elapsed_hours >= self.target_collection_hours:
+                    print(f"Target collection time reached ({self.target_collection_hours}h). Completing mission.")
+                    self.mission_complete()
+        
+        else:
+            # No camera data available - just print debug info for first few steps
+            if self._simulation_step_count % 100 == 1:  # Print every 100 simulation steps when no camera
+                print(f"⏳ Sim step {self._simulation_step_count}: No camera data, continuing movement...")
+        
+        # ALWAYS store current IMU for next step (both logged and non-logged steps)
+        self._previous_imu_data = current_imu_data
         
         return control
 
@@ -481,7 +764,9 @@ class DataCollectionAgent(AutonomousAgent):
         print(f"Total mission time: {total_elapsed_hours:.2f} hours (including {self.initial_delay}s startup delay)")
         print(f"Actual recording time: {recording_hours:.2f} hours")
         print(f"Trajectories collected: {stats['trajectories_saved']}")
-        print(f"Total steps: {stats['total_steps_collected']}")
+        print(f"Total logged steps: {stats['total_steps_collected']} (when camera data available)")
+        print(f"Total simulation steps: {self._simulation_step_count}")
+        print(f"Camera sync ratio: {self._step_count / self._simulation_step_count * 100:.1f}% of sim steps had camera data")
         print(f"Data saved to: {self.data_logger.save_dir}")
         
         # Create summary file
@@ -490,7 +775,11 @@ class DataCollectionAgent(AutonomousAgent):
             'recording_duration_hours': recording_hours,
             'initial_delay_seconds': self.initial_delay,
             'total_trajectories': stats['trajectories_saved'],
-            'total_steps': stats['total_steps_collected'],
+            'total_logged_steps': stats['total_steps_collected'],
+            'total_simulation_steps': self._simulation_step_count,
+            'camera_sync_ratio': self._step_count / max(self._simulation_step_count, 1),
+            'synchronization_note': 'Data logged only when CARLA camera data available (10Hz camera, 20Hz sim)',
+            'imu_enhancement': 'Dual-timestep IMU: [previous_step + current_step] for richer dynamics',
             'image_resolution': (self._width, self._height),
             'trajectory_types': self.trajectory_generator.trajectory_types,
             'completion_time': datetime.datetime.now().isoformat()

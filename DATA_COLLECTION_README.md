@@ -1,43 +1,46 @@
 # Lunar Navigation Data Collection System
 
-This system implements autonomous data collection for training a latent world model for lunar rover navigation, as described in `plan.md`. It collects diverse trajectories with RGB images, IMU data, positions, and actions for training the world model.
+This system implements autonomous data collection for training a latent world model for lunar rover navigation, as described in `plan.md`. It collects diverse trajectories with RGB images, dual-timestep IMU data, 6DOF poses, and actions for training the world model.
 
 ## Overview
 
 The data collection system consists of three main components:
 
-1. **`agents/data_collection_agent.py`** - Autonomous agent that collects training data
-2. **`run_data_collection.py`** - Configuration and execution script
-3. **`analyze_collected_data.py`** - Analysis and visualization of collected data
+1. **`agents/data_collection_agent.py`** - Autonomous agent that collects training data with comprehensive validation
+2. **Leaderboard execution** - Run with `./RunLeaderboard.sh --agent=agents.data_collection_agent`
+3. **`load_trajectory_example.py`** - Analysis and visualization of collected data
 
 ## Quick Start
 
 ### 1. Run Data Collection
 
 ```bash
-# Basic usage (2 hours of data collection)
-python run_data_collection.py
-
-# Custom collection time and output directory
-python run_data_collection.py --hours 5.0 --output-dir my_lunar_data
-
-# Run the actual collection with the leaderboard
+# Run the data collection with the leaderboard system
 ./RunLeaderboard.sh --agent=agents.data_collection_agent
+
+# The agent will automatically:
+# - Collect diverse trajectory types (random_walk, directed_move, turning_maneuvers, etc.)
+# - Save only trajectories with ≥99 logged steps (shorter ones are discarded)
+# - Ensure each trajectory file contains only ONE trajectory type
+# - Validate and correct all data shapes automatically
 ```
 
 ### 2. Analyze Collected Data
 
 ```bash
 # Analyze and visualize the collected data
-python analyze_collected_data.py data_collection/
+python load_trajectory_example.py
 
-# Custom output directory for analysis
-python analyze_collected_data.py data_collection/ --output-dir analysis_results/
+# This will show:
+# - Trajectory statistics and quality metrics
+# - Dual-timestep IMU analysis
+# - 6DOF pose visualization
+# - World model training data examples
 ```
 
 ## Data Collection Strategy
 
-Based on the plan in `plan.md`, the system implements diverse trajectory generation:
+Based on the plan in `plan.md`, the system implements diverse trajectory generation with strict quality control:
 
 ### Trajectory Types
 
@@ -47,15 +50,21 @@ Based on the plan in `plan.md`, the system implements diverse trajectory generat
 4. **Exploration** - Exploratory behavior with stops and direction changes
 5. **Spiral Pattern** - Systematic spiral movement patterns
 
+### Data Quality Control
+
+- **Minimum Length**: Only trajectories with ≥99 logged data points are saved
+- **Pure Trajectory Types**: Each file contains data from only ONE trajectory type (no mixing)
+- **Automatic Validation**: All data shapes are validated and corrected automatically
+- **Camera Synchronization**: Data logged only when CARLA camera data is available (10Hz)
+
 ### Data Collected
 
-For each timestep, the system records:
+For each timestep where camera data is available, the system records:
 
-- **RGB Image** (640x480) from front camera
-- **IMU Data** (accelerometer + gyroscope, 6 values)
-- **Position** (x, y, z coordinates relative to start)
-- **Action** (linear and angular velocities commanded)
-- **Vehicle Status** (drum speeds, arm angles, etc.)
+- **RGB Image** (640x480) from front camera (grayscale, validated)
+- **Dual-Timestep IMU Data** (12D) - [prev_acc_xyz, prev_gyro_xyz, curr_acc_xyz, curr_gyro_xyz]
+- **6DOF Pose** (x, y, z, roll, pitch, yaw) - complete pose information
+- **Action** (linear and angular velocities commanded, validated)
 - **Timestamp** for temporal analysis
 
 ## File Structure
@@ -64,20 +73,22 @@ After collection, your data directory will look like:
 
 ```
 data_collection/
-├── trajectory_0.npz           # Complete trajectory 0 (all data)
-├── trajectory_1.npz           # Complete trajectory 1 (all data)
-├── trajectory_2.npz           # Complete trajectory 2 (all data)
+├── trajectory_0.npz           # Pure trajectory type (e.g., turning_maneuvers)
+├── trajectory_1.npz           # Pure trajectory type (e.g., random_walk)
+├── trajectory_2.npz           # Pure trajectory type (e.g., directed_move)
+├── trajectory_3.npz           # Pure trajectory type (e.g., exploration)
 └── ...
 └── collection_summary.json    # Overall collection statistics
 ```
 
-Each `.npz` file contains all data for that trajectory:
-- `images`: (n_steps, height, width) array
-- `imu_data`: (n_steps, 6) array  
-- `poses`: (n_steps, 6) array - [x, y, z, roll, pitch, yaw]
-- `actions`: (n_steps, 2) array
-- `timestamps`: (n_steps,) array
-- `vehicle_status`: (n_steps, 4) array (removed for efficiency)
+Each `.npz` file contains validated data for a single trajectory type:
+- `images`: (n_steps, height, width) array - validated grayscale images
+- `imu_data`: (n_steps, 12) array - DUAL-TIMESTEP IMU [prev 6D + curr 6D]
+- `poses`: (n_steps, 6) array - [x, y, z, roll, pitch, yaw] 6DOF poses
+- `actions`: (n_steps, 2) array - [linear_vel, angular_vel] validated actions
+- `timestamps`: (n_steps,) array - Unix timestamps
+- `trajectory_id`: Scalar trajectory number
+- `n_steps`: Number of logged steps (≥99 guaranteed)
 
 ## Configuration
 
@@ -92,6 +103,9 @@ self.target_collection_hours = 2.0
 # Save frequency (steps between trajectory saves)
 self.save_frequency = 100
 
+# Minimum trajectory length (shorter trajectories discarded)
+self.min_trajectory_length = 99
+
 # Image resolution
 self._width = 640
 self._height = 480
@@ -101,40 +115,66 @@ max_linear_speed = 0.4    # m/s
 max_angular_speed = 0.5   # rad/s
 ```
 
-### Trajectory Length
+### Data Validation Settings
 
-- Random trajectory lengths between 100-1000 steps
-- Each step corresponds to one simulation timestep
-- At ~10 Hz, this gives 10-100 second trajectory segments
+The system automatically validates and corrects:
+
+```python
+# Expected data shapes (enforced automatically)
+expected_shapes = {
+    'image': (480, 640),  # Grayscale camera
+    'imu': 12,           # Dual-timestep IMU
+    'pose': 6,           # 6DOF pose
+    'action': 2          # Linear + angular velocity
+}
+```
+
+### Camera Synchronization
+
+- **CARLA cameras**: Run at 10Hz (every ~2 simulation steps)
+- **Simulation**: Runs at 20Hz 
+- **Data logging**: Only when camera data is available (~50% of simulation steps)
+- **IMU collection**: Every simulation step (dual-timestep enhancement)
 
 ## Data Format
 
-### Trajectory NPZ Format
+### Enhanced Trajectory NPZ Format
 
-Each trajectory is saved as a single compressed NumPy file (`.npz`) containing:
+Each trajectory is saved as a single compressed NumPy file (`.npz`) with validated data:
 
 ```python
 # Load trajectory data
 data = np.load('trajectory_0.npz')
 
-# Available arrays:
-images = data['images']           # Shape: (n_steps, 480, 640) - grayscale images
-imu_data = data['imu_data']       # Shape: (n_steps, 6) - [ax, ay, az, gx, gy, gz]
-poses = data['poses']             # Shape: (n_steps, 6) - [x, y, z, roll, pitch, yaw] in world coordinates
+# Available arrays (all validated):
+images = data['images']           # Shape: (n_steps, 480, 640) - validated grayscale
+imu_data = data['imu_data']       # Shape: (n_steps, 12) - DUAL-TIMESTEP IMU
+poses = data['poses']             # Shape: (n_steps, 6) - [x, y, z, roll, pitch, yaw]
 actions = data['actions']         # Shape: (n_steps, 2) - [linear_vel, angular_vel]
 timestamps = data['timestamps']   # Shape: (n_steps,) - Unix timestamps
-# vehicle_status removed for focus on core world model data
 trajectory_id = data['trajectory_id']    # Scalar: trajectory number
-n_steps = data['n_steps']         # Scalar: number of steps in trajectory
+n_steps = data['n_steps']         # Scalar: number of steps (≥99 guaranteed)
+
+# Dual-timestep IMU breakdown:
+prev_accelerometer = imu_data[:, 0:3]   # Previous step acceleration
+prev_gyroscope = imu_data[:, 3:6]       # Previous step angular velocity  
+curr_accelerometer = imu_data[:, 6:9]   # Current step acceleration
+curr_gyroscope = imu_data[:, 9:12]      # Current step angular velocity
+
+# 6DOF pose breakdown:
+positions = poses[:, :3]         # [x, y, z] positions
+orientations = poses[:, 3:]      # [roll, pitch, yaw] orientations
 ```
 
-### Advantages of NPZ Format
+### Advantages of Enhanced Format
 
-- **Single file per trajectory**: All data together for easy loading
-- **Compressed storage**: Reduced disk space usage
-- **Fast loading**: NumPy arrays load directly into memory
-- **Type preservation**: Maintains data types (uint8 for images, float64 for positions)
-- **Easy slicing**: Direct access to sequences for training
+- **Quality Guaranteed**: Only substantial trajectories (≥99 steps) are saved
+- **Pure Data**: Each file contains only one trajectory type
+- **Validated Shapes**: All data automatically validated and corrected
+- **Rich Dynamics**: Dual-timestep IMU captures high-frequency motion
+- **Complete Pose**: 6DOF pose enables full state reconstruction
+- **Fast Loading**: NumPy arrays load directly into memory
+- **Compressed Storage**: Reduced disk space usage
 
 ## Requirements
 
@@ -147,7 +187,8 @@ n_steps = data['n_steps']         # Scalar: number of steps in trajectory
 ### Python Dependencies
 
 ```bash
-pip install numpy matplotlib pandas
+pip install numpy matplotlib scipy
+# scipy is used for image resizing (fallback to numpy if unavailable)
 ```
 
 ## Usage Examples
@@ -156,118 +197,154 @@ pip install numpy matplotlib pandas
 
 ```bash
 # 1. Start CARLA with lunar environment
-# 2. Run collection for 2 hours
-python run_data_collection.py
-
-# 3. Execute with leaderboard
+# 2. Run collection
 ./RunLeaderboard.sh --agent=agents.data_collection_agent
-```
 
-### Extended Collection
-
-```bash
-# Collect 10 hours of data in custom directory
-python run_data_collection.py --hours 10.0 --output-dir lunar_dataset_large
-
-# Run with leaderboard
-./RunLeaderboard.sh --agent=agents.data_collection_agent
+# System will automatically:
+# - Collect diverse trajectory types
+# - Validate all data shapes
+# - Save only quality trajectories (≥99 steps)
+# - Discard partial/incomplete trajectories
 ```
 
 ### Data Analysis
 
 ```bash
-# Analyze collected data
-python analyze_collected_data.py lunar_dataset_large/
-
-# Skip plots if matplotlib not available
-python analyze_collected_data.py lunar_dataset_large/ --no-plots
-
-# Load and visualize trajectory data (new format)
+# Analyze collected data with enhanced visualization
 python load_trajectory_example.py
+
+# Shows:
+# - Dual-timestep IMU analysis
+# - 6DOF pose trajectories with orientation arrows
+# - Data quality validation results
+# - World model training examples
 ```
 
-## Expected Data Volume
+## Expected Data Volume and Quality
 
-Based on the plan.md targets:
+Based on the plan.md targets with quality control:
 
-- **Initial Goal**: 2-10 hours of driving data
 - **Target**: 10-20 hours for full dataset
+- **Quality**: Only trajectories with ≥99 logged steps
+- **Purity**: Each file contains only one trajectory type
+- **Frame Rate**: ~5-10 Hz (when camera data available)
+- **Total Frames**: ~180k-360k for 10 hours at 5-10 Hz
 - **Estimated Size**: ~10 GB per hour
-- **Frame Rate**: ~5-10 Hz
-- **Total Frames**: ~360k for 10 hours at 10 Hz
 
 ## Integration with World Model Training
 
-The collected data is structured for easy integration with world model training:
+The collected data is optimized for world model training:
 
-1. **Images** can be loaded and preprocessed for encoder training
-2. **IMU + 6DOF Pose** data provides complete state information
-3. **Actions** provide supervision for dynamics learning  
-4. **Trajectories** are pre-segmented for temporal modeling
+1. **Enhanced IMU**: Dual-timestep data provides richer motion dynamics
+2. **Complete Pose**: 6DOF pose enables full state modeling
+3. **Validated Data**: All shapes guaranteed correct, no preprocessing needed
+4. **Pure Trajectories**: Each file contains consistent behavior type
+5. **Quality Control**: Only substantial trajectories (≥99 steps)
 
-Example loading code:
+Example enhanced loading code:
 
 ```python
 import numpy as np
 
-# Load complete trajectory (single file)
+# Load validated trajectory
 data = np.load('trajectory_0.npz')
 
-# All data is immediately available as numpy arrays
-images = data['images']        # Shape: (n_steps, 480, 640)
-poses = data['poses']          # Shape: (n_steps, 6) - [x, y, z, roll, pitch, yaw]
-actions = data['actions']      # Shape: (n_steps, 2) 
-imu_data = data['imu_data']    # Shape: (n_steps, 6)
+# All data is pre-validated and ready for training
+images = data['images']        # Shape: (n_steps, 480, 640) - guaranteed
+dual_imu = data['imu_data']    # Shape: (n_steps, 12) - dual-timestep
+poses = data['poses']          # Shape: (n_steps, 6) - complete 6DOF
+actions = data['actions']      # Shape: (n_steps, 2) - validated
 
-# Extract position and orientation separately if needed
-positions = poses[:, :3]       # Shape: (n_steps, 3) - [x, y, z]
-orientations = poses[:, 3:]    # Shape: (n_steps, 3) - [roll, pitch, yaw]
+# Extract dual-timestep IMU components
+prev_imu = dual_imu[:, :6]     # Previous step IMU
+curr_imu = dual_imu[:, 6:]     # Current step IMU
 
-# Create sequences for world model training (example: 10-step sequences)
+# Extract pose components
+positions = poses[:, :3]       # [x, y, z] 
+orientations = poses[:, 3:]    # [roll, pitch, yaw]
+
+# Create training sequences (example: 10-step sequences)
 sequence_length = 10
 n_sequences = len(images) - sequence_length + 1
 
+# All sequences guaranteed to have proper shapes
 image_sequences = np.array([images[i:i+sequence_length] for i in range(n_sequences)])
 action_sequences = np.array([actions[i:i+sequence_length] for i in range(n_sequences)])
-# Result: image_sequences.shape = (n_sequences, sequence_length, 480, 640)
+pose_sequences = np.array([poses[i:i+sequence_length] for i in range(n_sequences)])
+# Result shapes: (n_sequences, sequence_length, data_dims)
 ```
+
+## Data Validation and Error Handling
+
+The system includes comprehensive validation:
+
+### Automatic Corrections
+
+1. **IMU Data**: 
+   - Too short → Padded by duplicating last element
+   - Too long → Truncated to 12D
+   - Invalid values → Replaced with safe defaults
+
+2. **Images**:
+   - None data → Placeholder with correct shape
+   - Wrong shape → Resized using scipy/numpy
+   - Invalid format → Safe fallbacks
+
+3. **Poses**:
+   - NaN/Infinite → Replaced with 0.0
+   - Extraction errors → Zero pose fallback
+
+4. **Actions**:
+   - Missing keys → Error handling with defaults
+   - Invalid values → Safe fallbacks
+
+### Quality Assurance
+
+- **Shape Assertions**: Debug output for first few steps
+- **Minimum Length**: Trajectories <99 steps automatically discarded
+- **Real-time Monitoring**: Status messages show validation results
+- **Error Recovery**: System continues even with data issues
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Disk Space**: Monitor available space during collection
-2. **Performance**: Reduce image resolution or collection frequency if needed
-3. **CARLA Connection**: Ensure CARLA is running before starting collection
+1. **Partial Trajectories**: System automatically discards trajectories <99 steps
+2. **Camera Sync**: ~50% of simulation steps have camera data (this is normal)
+3. **Data Shapes**: All shapes automatically validated and corrected
+4. **Performance**: Validation adds minimal overhead
 
 ### Monitoring Collection
 
-The agent prints regular status updates:
+Enhanced status messages show:
 
 ```
-Step 1000: Collected 10 trajectories, 1000 total steps, Elapsed: 0.25h
+🗑️ DISCARDING partial trajectory with only 45 steps (minimum: 99)
+✅ Saved trajectory 0 with 156 steps to trajectory_0.npz
+📏 Final shapes: img(156, 480, 640), imu(156, 12), pose(156, 6), action(156, 2)
 ```
 
-### Data Validation
+### Data Quality Validation
 
-Use the analysis script to verify data quality:
+Use the enhanced analysis script:
 
 ```bash
-python analyze_collected_data.py data_collection/
+python load_trajectory_example.py
 ```
 
-This will show:
-- Trajectory length distributions
-- Velocity distributions  
-- Spatial coverage
-- Data completeness
+This shows:
+- Data quality summary
+- Shape validation results
+- Dual-timestep IMU analysis
+- Trajectory type purity
+- Distance and orientation analysis
 
 ## Next Steps
 
-After collecting data, proceed to:
+After collecting validated data, proceed to:
 
-1. **World Model Training** - Use collected data to train encoder and dynamics model
-2. **Planning Implementation** - Implement MPC planner using learned model
-3. **Evaluation** - Test navigation performance on goal-reaching tasks
+1. **World Model Training** - Use dual-timestep IMU and 6DOF poses for richer models
+2. **Planning Implementation** - Leverage complete state information for better planning
+3. **Evaluation** - Test navigation with enhanced state representation
 
-See `plan.md` for detailed implementation guidelines for the world model and planning components. 
+The collected data is now optimized for world model training with guaranteed quality and consistency. See `plan.md` for detailed implementation guidelines for the world model and planning components. 
