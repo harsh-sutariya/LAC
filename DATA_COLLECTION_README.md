@@ -10,6 +10,24 @@ The data collection system consists of three main components:
 2. **Leaderboard execution** - Run with `./RunLeaderboard.sh --agent=agents.data_collection_agent`
 3. **`load_trajectory_example.py`** - Analysis and visualization of collected data
 
+### 🚨 Safety Features: Collision Detection & Emergency Exit
+
+The system includes robust safety mechanisms to handle collision scenarios:
+
+- **IMU-based collision detection**: Monitors acceleration magnitude to detect impacts with rocks/obstacles
+- **Stuck detection**: Tracks position changes over 20 consecutive steps to identify when rover is immobilized
+- **Map boundary enforcement**: Prevents rover from exiting the 27m×27m map area with safety boundaries
+- **Emergency exit protocol**: When collision+stuck OR boundary violation occurs, the system:
+  - **Force-saves current trajectory data immediately** (ignoring minimum length requirement)
+  - Displays collision/boundary location and mission statistics  
+  - Safely exits the mission to prevent data corruption
+- **Configurable thresholds**: 
+  - Collision threshold: 15.0 m/s² acceleration magnitude
+  - Stuck threshold: <0.2m movement over 20 steps
+  - Map boundary: 19.5m radius safety limit, 17.0m warning threshold
+- **Real-time monitoring**: All safety checks run every simulation step for immediate response
+- **Boundary avoidance**: When approaching boundaries, rover STOPS forward movement and steers toward map center
+
 ## Quick Start
 
 ### 1. Run Data Collection
@@ -52,10 +70,11 @@ Based on the plan in `plan.md`, the system implements diverse trajectory generat
 
 ### Data Quality Control
 
-- **Minimum Length**: Only trajectories with ≥99 logged data points are saved
+- **Minimum Length**: Only trajectories with ≥99 logged data points are saved (bypassed in emergencies)
 - **Pure Trajectory Types**: Each file contains data from only ONE trajectory type (no mixing)
 - **Automatic Validation**: All data shapes are validated and corrected automatically
 - **Camera Synchronization**: Data logged only when CARLA camera data is available (10Hz)
+- **Emergency Preservation**: Collision/boundary violations force-save any collected data regardless of length
 
 ### Data Collected
 
@@ -346,5 +365,5 @@ After collecting validated data, proceed to:
 1. **World Model Training** - Use dual-timestep IMU and 6DOF poses for richer models
 2. **Planning Implementation** - Leverage complete state information for better planning
 3. **Evaluation** - Test navigation with enhanced state representation
-
-The collected data is now optimized for world model training with guaranteed quality and consistency. See `plan.md` for detailed implementation guidelines for the world model and planning components. 
+  
+  The collected data is now optimized for world model training with guaranteed quality and consistency. See `plan.md` for detailed implementation guidelines for the world model and planning components. 

@@ -96,13 +96,35 @@ class TrajectoryGenerator:
         self.trajectory_length = random.randint(100, 1000)
         
         if self.current_trajectory_type == 'directed_move':
-            # Generate random target within reasonable range
-            angle = random.uniform(0, 2 * math.pi)
-            distance = random.uniform(10, 50)  # 10-50 meters
-            self.target_position = (
-                current_position[0] + distance * math.cos(angle),
-                current_position[1] + distance * math.sin(angle)
-            )
+            # Generate random target within map boundaries (stay within safe limits)
+            current_distance_from_center = math.sqrt(current_position[0]**2 + current_position[1]**2)
+            
+            # Adjust target range based on current position
+            if current_distance_from_center > 12.0:  # If we're getting far from center
+                max_target_distance = 8.0  # Use shorter, more conservative targets
+            else:
+                max_target_distance = 15.0  # Normal range when safely in center
+            
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                angle = random.uniform(0, 2 * math.pi)
+                distance = random.uniform(3, 15)  # Conservative range
+                target_x = current_position[0] + distance * math.cos(angle)
+                target_y = current_position[1] + distance * math.sin(angle)
+                
+                # Check if target is within safe boundaries
+                target_distance_from_center = math.sqrt(target_x**2 + target_y**2)
+                if target_distance_from_center <= max_target_distance:
+                    self.target_position = (target_x, target_y)
+                    break
+            else:
+                # If no safe target found, aim toward center
+                center_angle = math.atan2(-current_position[1], -current_position[0])
+                safe_distance = min(8.0, max_target_distance - 2.0)  # Conservative distance toward center
+                self.target_position = (
+                    current_position[0] + safe_distance * math.cos(center_angle),
+                    current_position[1] + safe_distance * math.sin(center_angle)
+                )
         
         print(f"🚀 Starting NEW trajectory: {self.current_trajectory_type} for {self.trajectory_length} steps")
         
@@ -366,9 +388,9 @@ class DataLogger:
                 print(f"❌ Data validation failed: {e}")
                 raise
 
-    def save_trajectory(self):
+    def save_trajectory(self, force_save=False):
         """Save current trajectory as a single numpy file and start a new one"""
-        if len(self.current_images) >= self.min_trajectory_length:
+        if len(self.current_images) >= self.min_trajectory_length or (force_save and len(self.current_images) > 0):
             current_steps = len(self.current_images)
             trajectory_filename = f"trajectory_{self.trajectory_count}.npz"
             trajectory_path = os.path.join(self.save_dir, trajectory_filename)
@@ -406,13 +428,18 @@ class DataLogger:
                 n_steps=current_steps
             )
             
-            print(f"✅ Saved trajectory {self.trajectory_count} with {current_steps} steps to {trajectory_filename}")
+            if force_save and current_steps < self.min_trajectory_length:
+                print(f"🚨 EMERGENCY SAVE: trajectory {self.trajectory_count} with {current_steps} steps to {trajectory_filename}")
+                print(f"⚠️  Below minimum length ({self.min_trajectory_length}) but force-saved due to emergency")
+            else:
+                print(f"✅ Saved trajectory {self.trajectory_count} with {current_steps} steps to {trajectory_filename}")
+            
             print(f"📏 Final shapes: img{images.shape}, imu{imu_data.shape}, pose{poses.shape}, action{actions.shape}")
             
             # Update total steps counter with actual steps saved
             self.total_steps_saved += current_steps
             self.trajectory_count += 1
-        elif len(self.current_images) > 0:
+        elif len(self.current_images) > 0 and not force_save:
             print(f"🗑️  DISCARDING trajectory with {len(self.current_images)} steps (minimum: {self.min_trajectory_length})")
         else:
             print("⚠️  No data to save in current trajectory")
@@ -491,6 +518,19 @@ class DataCollectionAgent(AutonomousAgent):
         self._current_action = None
         self._previous_imu_data = None
         
+        # Collision and stuck detection
+        self._collision_detected = False
+        self._collision_threshold = 15.0  # Acceleration threshold for collision (m/s²)
+        self._stuck_detection_steps = 70  # Number of steps to check for stuck condition
+        self._position_history = []  # Track recent positions for stuck detection
+        self._movement_threshold = 0.05  # Minimum movement in meters over stuck_detection_steps
+        self._stuck_counter = 0  # Count steps where rover is stuck
+        
+        # Map boundary constraints (from constants.py)
+        self._map_size = 27.0  # meters (full map size)
+        self._bounds_distance = 19.5  # meters (safety boundary from center to prevent mesh exit)
+        self._boundary_warning_distance = 17.0  # meters (warn when approaching boundary)
+        
         # Camera dimensions (for sensor configuration)
         self._width = 640
         self._height = 480
@@ -500,6 +540,8 @@ class DataCollectionAgent(AutonomousAgent):
         print(f"⏱️  CARLA cameras run at 10Hz (every 2 sim steps). Data collected only when camera available.")
         print(f"📁 Each trajectory file will contain data from only ONE trajectory type")
         print(f"🗑️  Trajectories shorter than {self.min_trajectory_length} steps will be discarded")
+        print(f"🚨 Collision detection: IMU threshold={self._collision_threshold} m/s², stuck detection={self._stuck_detection_steps} steps")
+        print(f"🗺️  Map boundaries: ±{self._map_size/2:.1f}m, safety boundary: {self._bounds_distance}m radius")
 
     def use_fiducials(self):
         return True
@@ -646,6 +688,39 @@ class DataCollectionAgent(AutonomousAgent):
         # ALWAYS capture IMU data (every simulation step for high-frequency dynamics)
         current_imu_data = self.get_imu_data()
         
+        # Collision and stuck detection (runs every simulation step)
+        if self._recording_started:  # Only check after recording has started
+            # Detect collision using IMU data
+            collision_detected = self._detect_collision(current_imu_data)
+            if collision_detected:
+                self._collision_detected = True
+            
+            # Detect if rover is stuck using position tracking
+            stuck_detected = self._detect_stuck(current_position)
+            
+            # If both collision and stuck are detected, handle emergency exit
+            if self._collision_detected or stuck_detected:
+                self._handle_collision_and_stuck()
+                return carla.VehicleVelocityControl(0.0, 0.0)  # Stop rover immediately
+        
+        # Map boundary checking (runs every simulation step)
+        if self._recording_started:  # Only check after recording has started
+            out_of_bounds, approaching_boundary, boundary_correction = self._check_map_boundaries(current_position)
+            
+            # If rover has exceeded boundary, handle emergency exit
+            if out_of_bounds:
+                self._handle_boundary_violation(current_position)
+                return carla.VehicleVelocityControl(0.0, 0.0)  # Stop rover immediately
+            
+            # If approaching boundary, override current action with boundary correction
+            if approaching_boundary and boundary_correction:
+                if self._step_count % 20 == 0:  # Print occasionally to avoid spam
+                    distance_from_center = math.sqrt(current_position.x**2 + current_position.y**2)
+                    print(f"🗺️  Boundary warning: {distance_from_center:.2f}m from center, STOPPING and steering toward center...")
+                
+                # Override current action with boundary correction
+                self._current_action = boundary_correction
+        
         # Check if camera data is available (CARLA 10Hz camera sync)
         front_camera_data = input_data['Grayscale'].get(carla.SensorPosition.FrontLeft, None)
         
@@ -789,4 +864,158 @@ class DataCollectionAgent(AutonomousAgent):
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"Collection summary saved to: {summary_path}") 
+        print(f"Collection summary saved to: {summary_path}")
+
+    def _detect_collision(self, imu_data):
+        """
+        Detect collision using IMU acceleration data.
+        Returns True if collision is detected.
+        """
+        if imu_data is None or len(imu_data) < 6:
+            return False
+        
+        try:
+            # Extract current step acceleration (last 3 values for current step)
+            if len(imu_data) >= 12:
+                # Dual-timestep IMU: current acceleration is at indices 6, 7, 8
+                acc_x, acc_y, acc_z = imu_data[6], imu_data[7], imu_data[8]
+            else:
+                # Legacy single-step IMU: acceleration is at indices 0, 1, 2
+                acc_x, acc_y, acc_z = imu_data[0], imu_data[1], imu_data[2]
+            
+            # Calculate total acceleration magnitude
+            acceleration_magnitude = math.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+            
+            # Check if acceleration exceeds collision threshold
+            if acceleration_magnitude > self._collision_threshold:
+                print(f"🚨 COLLISION DETECTED! Acceleration magnitude: {acceleration_magnitude:.2f} m/s² (threshold: {self._collision_threshold})")
+                return True
+                
+        except Exception as e:
+            print(f"⚠️  Error in collision detection: {e}")
+            
+        return False
+    
+    def _detect_stuck(self, current_position):
+        """
+        Detect if rover is stuck by tracking position changes over recent steps.
+        Returns True if rover hasn't moved much over the last stuck_detection_steps.
+        """
+        # Add current position to history
+        self._position_history.append((current_position.x, current_position.y, current_position.z))
+        
+        # Keep only the last stuck_detection_steps positions
+        if len(self._position_history) > self._stuck_detection_steps:
+            self._position_history.pop(0)
+        
+        # Need at least stuck_detection_steps positions to check
+        if len(self._position_history) < self._stuck_detection_steps:
+            return False
+        
+        # Calculate total movement over the tracked period
+        start_pos = np.array(self._position_history[0])
+        end_pos = np.array(self._position_history[-1])
+        total_movement = np.linalg.norm(end_pos - start_pos)
+        
+        # Check if movement is below threshold
+        is_stuck = total_movement < self._movement_threshold
+        
+        if is_stuck:
+            self._stuck_counter += 1
+            if self._stuck_counter % 5 == 1:  # Print every 5 steps to avoid spam
+                print(f"🔒 Rover appears stuck: movement={total_movement:.3f}m over {len(self._position_history)} steps "
+                      f"(threshold: {self._movement_threshold}m)")
+        else:
+            self._stuck_counter = 0  # Reset counter if rover moves
+            
+        return is_stuck
+    
+    def _handle_collision_and_stuck(self):
+        """
+        Handle the case where rover has collided and is stuck.
+        Save current trajectory and exit mission.
+        """
+        print("💥 COLLISION + STUCK DETECTED!")
+        print(f"🔒 Rover has been stuck for {self._stuck_counter} steps after collision")
+        print(f"📁 Force-saving current trajectory before emergency exit (ignoring minimum length)...")
+        
+        # Force save current trajectory data regardless of length
+        self.data_logger.save_trajectory(force_save=True)
+        
+        # Get final statistics
+        stats = self.data_logger.get_statistics()
+        total_elapsed_hours = (time.time() - self._mission_start_time) / 3600.0
+        
+        print(f"🚨 EMERGENCY MISSION EXIT due to collision + stuck condition")
+        print(f"📊 Mission Summary:")
+        print(f"   Total mission time: {total_elapsed_hours:.2f} hours")
+        print(f"   Trajectories collected: {stats['trajectories_saved']}")
+        print(f"   Total logged steps: {stats['total_steps_collected']}")
+        print(f"   Final collision location: ({self._position_history[-1][0]:.2f}, {self._position_history[-1][1]:.2f}, {self._position_history[-1][2]:.2f})")
+        
+        # Exit mission
+        print("🚪 Calling mission_complete() to exit...")
+        self.mission_complete()
+    
+    def _check_map_boundaries(self, current_position):
+        """
+        Check if rover is approaching or exceeding map boundaries.
+        Returns (out_of_bounds, approaching_boundary, corrected_action)
+        """
+        # Calculate distance from center (0, 0)
+        distance_from_center = math.sqrt(current_position.x**2 + current_position.y**2)
+        
+        # Check if rover is outside safety boundary
+        out_of_bounds = distance_from_center > self._bounds_distance
+        
+        # Check if rover is approaching boundary
+        approaching_boundary = distance_from_center > self._boundary_warning_distance
+        
+        # Generate corrected action if needed (stop and steer toward center)
+        corrected_action = None
+        if approaching_boundary:
+            # Calculate angle toward center
+            angle_to_center = math.atan2(-current_position.y, -current_position.x)
+            
+            # STOP and steer toward center when approaching boundary
+            linear_speed = 0.0  # Stop forward movement
+            angular_speed = angle_to_center * 1.0  # More aggressive steering toward center
+            
+            corrected_action = {
+                'linear_velocity': linear_speed,
+                'angular_velocity': max(-0.5, min(0.5, angular_speed)),  # Increased turn rate for faster correction
+                'generated_at_sim_step': self._simulation_step_count,
+                'boundary_correction': True
+            }
+        
+        return out_of_bounds, approaching_boundary, corrected_action
+    
+    def _handle_boundary_violation(self, current_position):
+        """
+        Handle the case where rover has exceeded map boundaries.
+        Save current trajectory and exit mission.
+        """
+        distance_from_center = math.sqrt(current_position.x**2 + current_position.y**2)
+        
+        print("🗺️  MAP BOUNDARY VIOLATION!")
+        print(f"🚨 Rover exceeded safety boundary: {distance_from_center:.2f}m (limit: {self._bounds_distance}m)")
+        print(f"📍 Current position: ({current_position.x:.2f}, {current_position.y:.2f})")
+        print(f"📁 Force-saving current trajectory before emergency exit (ignoring minimum length)...")
+        
+        # Force save current trajectory data regardless of length
+        self.data_logger.save_trajectory(force_save=True)
+        
+        # Get final statistics
+        stats = self.data_logger.get_statistics()
+        total_elapsed_hours = (time.time() - self._mission_start_time) / 3600.0
+        
+        print(f"🚨 EMERGENCY MISSION EXIT due to map boundary violation")
+        print(f"📊 Mission Summary:")
+        print(f"   Total mission time: {total_elapsed_hours:.2f} hours")
+        print(f"   Trajectories collected: {stats['trajectories_saved']}")
+        print(f"   Total logged steps: {stats['total_steps_collected']}")
+        print(f"   Final boundary violation location: ({current_position.x:.2f}, {current_position.y:.2f})")
+        
+        # Exit mission
+        print("🚪 Calling mission_complete() to exit...")
+        self.mission_complete() 
