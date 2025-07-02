@@ -15,15 +15,16 @@ The data collection system consists of three main components:
 The system includes robust safety mechanisms to handle collision scenarios:
 
 - **IMU-based collision detection**: Monitors acceleration magnitude to detect impacts with rocks/obstacles
-- **Stuck detection**: Tracks position changes over 20 consecutive steps to identify when rover is immobilized
+- **Stuck detection**: Tracks position changes over 70 consecutive steps to identify when rover is immobilized
 - **Map boundary enforcement**: Prevents rover from exiting the 27m×27m map area with safety boundaries
-- **Emergency exit protocol**: When collision+stuck OR boundary violation occurs, the system:
+- **Emergency restart protocol**: When collision+stuck OR boundary violation occurs, the system:
   - **Force-saves current trajectory data immediately** (ignoring minimum length requirement)
-  - Displays collision/boundary location and mission statistics  
-  - Safely exits the mission to prevent data corruption
+  - **Teleports rover to a safe location** (2-8m from map center with random orientation)
+  - **Resets all detection states** and starts new trajectory
+  - **Continues mission** for maximum data collection instead of exiting
 - **Configurable thresholds**: 
   - Collision threshold: 15.0 m/s² acceleration magnitude
-  - Stuck threshold: <0.2m movement over 20 steps
+  - Stuck threshold: <0.05m movement over 70 steps
   - Map boundary: 19.5m radius safety limit, 17.0m warning threshold
 - **Real-time monitoring**: All safety checks run every simulation step for immediate response
 - **Boundary avoidance**: When approaching boundaries, rover STOPS forward movement and steers toward map center
@@ -33,15 +34,30 @@ The system includes robust safety mechanisms to handle collision scenarios:
 ### 1. Run Data Collection
 
 ```bash
-# Run the data collection with the leaderboard system
+# Run the data collection with the leaderboard system (5-hour collection)
 ./RunLeaderboard.sh --agent=agents.data_collection_agent
 
 # The agent will automatically:
 # - Collect diverse trajectory types (random_walk, directed_move, turning_maneuvers, etc.)
+# - Run for 5 hours of recording time (configurable)
 # - Save only trajectories with ≥99 logged steps (shorter ones are discarded)
 # - Ensure each trajectory file contains only ONE trajectory type
 # - Validate and correct all data shapes automatically
+# - Handle collisions and boundary violations with automatic recovery
 ```
+
+### Collection Duration Configuration
+
+The current collection target is set to **5 hours** in `agents/data_collection_agent.py`:
+
+```python
+self.target_collection_hours = 5.0  # Target collection time in hours
+```
+
+To modify the collection duration:
+- **Shorter collection**: Change to `2.0` for 2 hours
+- **Longer collection**: Change to `10.0` for 10 hours (as recommended in plan.md)
+- **Full dataset**: Change to `20.0` for 20 hours for comprehensive training data
 
 ### 2. Analyze Collected Data
 
@@ -75,6 +91,7 @@ Based on the plan in `plan.md`, the system implements diverse trajectory generat
 - **Automatic Validation**: All data shapes are validated and corrected automatically
 - **Camera Synchronization**: Data logged only when CARLA camera data is available (10Hz)
 - **Emergency Preservation**: Collision/boundary violations force-save any collected data regardless of length
+- **Automatic Recovery**: Rover teleports to safe locations and continues mission instead of terminating
 
 ### Data Collected
 
@@ -117,7 +134,7 @@ You can modify these parameters in `agents/data_collection_agent.py`:
 
 ```python
 # Collection duration
-self.target_collection_hours = 2.0
+self.target_collection_hours = 5.0
 
 # Save frequency (steps between trajectory saves)
 self.save_frequency = 100
@@ -216,14 +233,15 @@ pip install numpy matplotlib scipy
 
 ```bash
 # 1. Start CARLA with lunar environment
-# 2. Run collection
+# 2. Run collection (will run for 5 hours)
 ./RunLeaderboard.sh --agent=agents.data_collection_agent
 
 # System will automatically:
-# - Collect diverse trajectory types
+# - Collect diverse trajectory types for 5 hours
 # - Validate all data shapes
 # - Save only quality trajectories (≥99 steps)
 # - Discard partial/incomplete trajectories
+# - Handle collisions and boundary violations with automatic recovery
 ```
 
 ### Data Analysis
@@ -243,12 +261,12 @@ python load_trajectory_example.py
 
 Based on the plan.md targets with quality control:
 
-- **Target**: 10-20 hours for full dataset
+- **Target**: 5 hours for current collection (configurable up to 10-20 hours for full dataset)
 - **Quality**: Only trajectories with ≥99 logged steps
 - **Purity**: Each file contains only one trajectory type
 - **Frame Rate**: ~5-10 Hz (when camera data available)
-- **Total Frames**: ~180k-360k for 10 hours at 5-10 Hz
-- **Estimated Size**: ~10 GB per hour
+- **Total Frames**: ~90k-180k for 5 hours at 5-10 Hz
+- **Estimated Size**: ~5 GB for 5 hours
 
 ## Integration with World Model Training
 

@@ -11,6 +11,7 @@ Each trajectory is saved as a single .npz file containing all data:
 
 Note: Only trajectories with ≥99 logged steps are saved. Shorter trajectories are discarded.
 Each trajectory file contains data from only ONE trajectory type (e.g., pure "random_walk" or "turning_maneuvers").
+Current collection target: 5 hours of recording time (~90k-180k frames at 5-10 Hz).
 """
 
 import numpy as np
@@ -300,10 +301,12 @@ def main():
     if not os.path.exists(data_dir):
         print(f"Data directory '{data_dir}' not found!")
         print("Make sure you have run the data collection first.")
+        print("Run: ./RunLeaderboard.sh --agent=agents.data_collection_agent")
         return
     
     print("Loading trajectories...")
     print("Note: Only trajectories with ≥99 steps are saved by the data collection system.")
+    print("Current collection target: 5 hours of recording time")
     trajectories = load_all_trajectories(data_dir)
     
     if not trajectories:
@@ -351,6 +354,8 @@ def main():
     print(f"- Each file contains pure trajectory type data (no mixing)")
     print(f"- IMU data is dual-timestep enhanced for richer dynamics")
     print(f"- All data shapes are validated and corrected automatically")
+    print(f"- Collection target: 5 hours of recording time")
+    print(f"- Expected data volume: ~90k-180k frames for 5 hours at 5-10 Hz")
 
 if __name__ == "__main__":
     main() 
