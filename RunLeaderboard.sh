@@ -12,13 +12,13 @@ export TEAM_AGENT="$SCRIPT_DIR/data_collection_agent.py"
 export MISSIONS="$LEADERBOARD_ROOT/data/missions_training.xml"
 export MISSIONS_SUBSET="0"
 
-export CHECKPOINT_ENDPOINT="$SCRIPT_DIR/results"
+
 
 export REPETITIONS="1"
 
 export RECORD=
 export RECORD_CONTROL=
-export RESUME=
+export RESUME=0
 
 export QUALIFIER=
 export EVALUATION=
@@ -31,7 +31,6 @@ python3 "${LEADERBOARD_ROOT}/leaderboard/leaderboard_evaluator.py" \
   --missions-subset="${MISSIONS_SUBSET}" \
   --seed="${SEED}" \
   --repetitions="${REPETITIONS}" \
-  --checkpoint="${CHECKPOINT_ENDPOINT}" \
   --agent="${TEAM_AGENT}" \
   --agent-config="${TEAM_CONFIG}" \
   --record="${RECORD}" \

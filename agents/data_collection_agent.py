@@ -207,7 +207,14 @@ class DataLogger:
     """Handles saving trajectory data for world model training"""
     
     def __init__(self, save_dir="data_collection", min_trajectory_length=99):
-        self.save_dir = save_dir
+        # Use mission-specific directory if environment variable is set
+        if 'MISSION_DATA_DIR' in os.environ:
+            self.save_dir = os.environ['MISSION_DATA_DIR']
+            print(f"🎯 Using mission-specific directory: {self.save_dir}")
+        else:
+            self.save_dir = save_dir
+            print(f"⚠️  No mission directory specified, using default: {save_dir}")
+        
         self.trajectory_count = 0
         self.total_steps_saved = 0  # Track actual total steps across all saved trajectories
         self.min_trajectory_length = min_trajectory_length  # Minimum steps to save a trajectory
@@ -229,9 +236,9 @@ class DataLogger:
         }
         
         # Create save directory
-        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(self.save_dir, exist_ok=True)
         
-        print(f"Data will be saved to: {save_dir}")
+        print(f"Data will be saved to: {self.save_dir}")
         print(f"📏 Expected data shapes: image={self.expected_shapes['image']}, "
               f"imu={self.expected_shapes['imu']}D, pose={self.expected_shapes['pose']}D, "
               f"action={self.expected_shapes['action']}D")
@@ -530,8 +537,6 @@ class DataCollectionAgent(AutonomousAgent):
         # Mission state
         self._mission_start_time = time.time()
         
-        # Try to find mission system components for vehicle respawn updates
-        self._find_mission_components()
         self._recording_started = False
         self._recording_start_time = None
         self._start_position = None
@@ -548,7 +553,7 @@ class DataCollectionAgent(AutonomousAgent):
         # Collision and stuck detection
         self._collision_detected = False
         self._collision_threshold = 15.0  # Acceleration threshold for collision (m/s²)
-        self._stuck_detection_steps = 70  # Number of steps to check for stuck condition
+        self._stuck_detection_steps = 100  # Number of steps to check for stuck condition
         self._position_history = []  # Track recent positions for stuck detection
         self._movement_threshold = 0.05  # Minimum movement in meters over stuck_detection_steps
         self._stuck_counter = 0  # Count steps where rover is stuck
@@ -747,15 +752,6 @@ class DataCollectionAgent(AutonomousAgent):
             if out_of_bounds:
                 self._handle_boundary_violation(current_position)
                 return carla.VehicleVelocityControl(0.0, 0.0)  # Stop rover immediately
-            
-            # If approaching boundary, override current action with boundary correction
-            if approaching_boundary and boundary_correction:
-                if self._step_count % 20 == 0:  # Print occasionally to avoid spam
-                    distance_from_center = math.sqrt(current_position.x**2 + current_position.y**2)
-                    print(f"🗺️  Boundary warning: {distance_from_center:.2f}m from center, STOPPING and steering toward center...")
-                
-                # Override current action with boundary correction
-                self._current_action = boundary_correction
         
         # Check if camera data is available (CARLA 10Hz camera sync)
         front_camera_data = input_data['Grayscale'].get(carla.SensorPosition.FrontLeft, None)
@@ -880,8 +876,9 @@ class DataCollectionAgent(AutonomousAgent):
         print(f"Camera sync ratio: {self._step_count / self._simulation_step_count * 100:.1f}% of sim steps had camera data")
         print(f"Data saved to: {self.data_logger.save_dir}")
         
-        # Create summary file
-        summary = {
+        # Create mission-specific summary file
+        mission_summary = {
+            'mission_data_dir': self.data_logger.save_dir,
             'total_mission_duration_hours': total_elapsed_hours,
             'recording_duration_hours': recording_hours,
             'initial_delay_seconds': self.initial_delay,
@@ -896,11 +893,15 @@ class DataCollectionAgent(AutonomousAgent):
             'completion_time': datetime.datetime.now().isoformat()
         }
         
-        summary_path = os.path.join(self.data_logger.save_dir, "collection_summary.json")
-        with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=2)
+        # Save mission-specific summary
+        mission_summary_path = os.path.join(self.data_logger.save_dir, "mission_summary.json")
+        with open(mission_summary_path, 'w') as f:
+            json.dump(mission_summary, f, indent=2)
         
-        print(f"Collection summary saved to: {summary_path}")
+        print(f"Mission summary saved to: {mission_summary_path}")
+        
+        # Create/update global summary in main data_collection directory
+        self._update_global_summary()
 
     def _detect_collision(self, imu_data):
         """
@@ -969,371 +970,31 @@ class DataCollectionAgent(AutonomousAgent):
     def _handle_collision_and_stuck(self):
         """
         Handle the case where rover has collided and is stuck.
-        Save current trajectory and restart from a safe location.
+        Save current trajectory and raise exception to trigger mission restart.
         """
         print("💥 COLLISION + STUCK DETECTED!")
         print(f"🔒 Rover has been stuck for {self._stuck_counter} steps after collision")
-        print(f"📁 Force-saving current trajectory before restart (ignoring minimum length)...")
+        print(f"📁 Force-saving current trajectory before mission restart (ignoring minimum length)...")
         
         # Force save current trajectory data regardless of length
         self.data_logger.save_trajectory(force_save=True)
+        
+        # Update global summary before restarting
+        self._update_global_summary()
         
         # Get current statistics
         stats = self.data_logger.get_statistics()
         collision_location = self._position_history[-1] if self._position_history else (0, 0, 0)
         
-        print(f"🔄 RESTARTING ROVER from starting location instead of mission exit")
+        print(f"🔄 RESTARTING MISSION (raising exception to trigger restart)")
         print(f"📊 Current Progress:")
         print(f"   Trajectories collected so far: {stats['trajectories_saved']}")
         print(f"   Total logged steps: {stats['total_steps_collected']}")
         print(f"   Collision location: ({collision_location[0]:.2f}, {collision_location[1]:.2f}, {collision_location[2]:.2f})")
         
-        # Restart rover from starting location
-        self._restart_from_safe_location()
-    
-    def _restart_from_safe_location(self):
-        """
-        Restart rover from the original starting location.
-        Resets all collision/stuck detection states and continues mission.
-        """
-        # Use the original starting position
-        if self._start_position is not None:
-            safe_x = self._start_position.x
-            safe_y = self._start_position.y
-            safe_z = self._start_position.z
-        else:
-            # Fallback to center if starting position not available
-            safe_x, safe_y = 0.0, 0.0
-            safe_z = 0.5
-        
-        # Use original orientation (facing north) for consistency
-        safe_yaw = 0.0  # degrees (facing north)
-        
-        print(f"🚁 Teleporting rover back to starting location: ({safe_x:.2f}, {safe_y:.2f}) with yaw {safe_yaw:.0f}°")
-        
-        # Create new transform for safe location
-        safe_location = carla.Location(x=safe_x, y=safe_y, z=safe_z)
-        safe_rotation = carla.Rotation(pitch=0.0, yaw=safe_yaw, roll=0.0)
-        safe_transform = carla.Transform(safe_location, safe_rotation)
-        
-        # Get vehicle reference if not already available
-        if self._ego_vehicle is None and self.world is not None:
-            try:
-                vehicles = self.world.get_actors().filter('vehicle.ipex.ipex')
-                if len(vehicles) > 0:
-                    self._ego_vehicle = vehicles[0]
-                    print("🎯 Found rover vehicle for teleportation")
-                else:
-                    print("⚠️  No rover vehicle found in world")
-            except Exception as e:
-                print(f"⚠️  Error finding rover vehicle: {e}")
-        
-        # Try multiple teleportation methods
-        teleportation_successful = False
-        
-        try:
-            if self._ego_vehicle is not None:
-                # Get current position before teleportation for verification
-                current_pos_before = self._ego_vehicle.get_transform().location
-                print(f"📍 Current position before teleport: ({current_pos_before.x:.2f}, {current_pos_before.y:.2f}, {current_pos_before.z:.2f})")
-                
-                # Method 1: Enhanced standard teleportation with multiple attempts
-                print(f"🔄 Attempting Method 1: Enhanced standard teleportation...")
-                for method1_attempt in range(5):  # Try 5 times with different approaches
-                    try:
-                        print(f"   Method 1 - Attempt {method1_attempt + 1}/5...")
-                        
-                        # Stop the vehicle completely first
-                        self._ego_vehicle.set_target_velocity(carla.Vector3D(0, 0, 0))
-                        self._ego_vehicle.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
-                        time.sleep(0.1)
-                        
-                        # Different heights for each attempt
-                        z_offset = safe_z + 2.0 + method1_attempt
-                        attempt_transform = carla.Transform(
-                            carla.Location(x=safe_x, y=safe_y, z=z_offset),
-                            carla.Rotation(pitch=0.0, yaw=safe_yaw, roll=0.0)
-                        )
-                        
-                        # Disable physics, teleport, wait, enable physics
-                        self._ego_vehicle.set_simulate_physics(False)
-                        time.sleep(0.2)
-                        self._ego_vehicle.set_transform(attempt_transform)
-                        time.sleep(0.3)
-                        self._ego_vehicle.set_simulate_physics(True)
-                        time.sleep(0.4)
-                        
-                        # Give the world some ticks to settle
-                        for _ in range(5):
-                            self.world.tick()
-                        
-                        # Check if it worked
-                        pos_after_attempt = self._ego_vehicle.get_transform().location
-                        distance_moved = math.sqrt(
-                            (pos_after_attempt.x - current_pos_before.x)**2 + 
-                            (pos_after_attempt.y - current_pos_before.y)**2
-                        )
-                        
-                        target_distance = math.sqrt(
-                            (pos_after_attempt.x - safe_x)**2 + 
-                            (pos_after_attempt.y - safe_y)**2
-                        )
-                        
-                        print(f"   Position: ({pos_after_attempt.x:.2f}, {pos_after_attempt.y:.2f}, {pos_after_attempt.z:.2f})")
-                        print(f"   Distance moved: {distance_moved:.2f}m, Target distance: {target_distance:.2f}m")
-                        
-                        if distance_moved > 1.0 and target_distance < 5.0:
-                            teleportation_successful = True
-                            print(f"✅ Method 1 successful on attempt {method1_attempt + 1}!")
-                            break
-                            
-                    except Exception as e1:
-                        print(f"   Method 1 attempt {method1_attempt + 1} failed: {e1}")
-                        continue
-                
-                # Method 2: Force teleport with world ticks (only if Method 1 completely failed)
-                if not teleportation_successful:
-                    print(f"🔄 Attempting Method 2: Force teleport with world synchronization...")
-                    for method2_attempt in range(3):
-                        try:
-                            print(f"   Method 2 - Attempt {method2_attempt + 1}/3...")
-                            
-                            # Try different positions around the target
-                            x_offset = 0.5 * method2_attempt
-                            y_offset = 0.5 * method2_attempt
-                            z_offset = safe_z + 3.0 + method2_attempt
-                            
-                            force_transform = carla.Transform(
-                                carla.Location(x=safe_x + x_offset, y=safe_y + y_offset, z=z_offset),
-                                carla.Rotation(pitch=0.0, yaw=safe_yaw, roll=0.0)
-                            )
-                            
-                            # Direct teleportation with world synchronization
-                            self._ego_vehicle.set_transform(force_transform)
-                            
-                            # Give more world ticks for synchronization
-                            for _ in range(10):
-                                self.world.tick()
-                                time.sleep(0.05)
-                            
-                            # Verify result
-                            pos_after_force = self._ego_vehicle.get_transform().location
-                            force_distance = math.sqrt(
-                                (pos_after_force.x - safe_x)**2 + 
-                                (pos_after_force.y - safe_y)**2
-                            )
-                            
-                            print(f"   Position: ({pos_after_force.x:.2f}, {pos_after_force.y:.2f}, {pos_after_force.z:.2f})")
-                            print(f"   Target distance: {force_distance:.2f}m")
-                            
-                            if force_distance < 8.0:  # More lenient check
-                                teleportation_successful = True
-                                print(f"✅ Method 2 successful on attempt {method2_attempt + 1}!")
-                                break
-                                
-                        except Exception as e2:
-                            print(f"   Method 2 attempt {method2_attempt + 1} failed: {e2}")
-                            continue
-                
-                # Method 3: Force teleport with extreme measures (avoid vehicle destruction)
-                if not teleportation_successful:
-                    print(f"⚠️  WARNING: All standard teleportation methods failed")
-                    print(f"🔄 Attempting Method 3: Extreme force teleport (preserving all actors)...")
-                    try:
-                        # Try extreme force teleportation without destroying vehicle
-                        for extreme_attempt in range(5):
-                            try:
-                                print(f"   Extreme attempt {extreme_attempt + 1}/5...")
-                                
-                                # Stop all movement completely
-                                self._ego_vehicle.set_target_velocity(carla.Vector3D(0, 0, 0))
-                                self._ego_vehicle.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
-                                time.sleep(0.2)
-                                
-                                # Disable physics completely
-                                self._ego_vehicle.set_simulate_physics(False)
-                                time.sleep(0.3)
-                                
-                                # Try very high Z position to avoid terrain collision
-                                extreme_z = safe_z + 10.0 + extreme_attempt * 2.0
-                                extreme_transform = carla.Transform(
-                                    carla.Location(x=safe_x, y=safe_y, z=extreme_z),
-                                    carla.Rotation(pitch=0.0, yaw=safe_yaw, roll=0.0)
-                                )
-                                
-                                # Force teleport
-                                self._ego_vehicle.set_transform(extreme_transform)
-                                time.sleep(0.5)
-                                
-                                # Re-enable physics
-                                self._ego_vehicle.set_simulate_physics(True)
-                                time.sleep(0.5)
-                                
-                                # Give many world ticks for settling
-                                for _ in range(30):
-                                    self.world.tick()
-                                    time.sleep(0.05)
-                                
-                                # Check result
-                                extreme_pos = self._ego_vehicle.get_transform().location
-                                extreme_distance = math.sqrt(
-                                    (extreme_pos.x - safe_x)**2 + 
-                                    (extreme_pos.y - safe_y)**2
-                                )
-                                
-                                print(f"   Position: ({extreme_pos.x:.2f}, {extreme_pos.y:.2f}, {extreme_pos.z:.2f})")
-                                print(f"   Target distance: {extreme_distance:.2f}m")
-                                
-                                if extreme_distance < 10.0:  # Very lenient check
-                                    teleportation_successful = True
-                                    print(f"✅ Method 3 successful on extreme attempt {extreme_attempt + 1}!")
-                                    break
-                                    
-                            except Exception as e_extreme:
-                                print(f"   Extreme attempt {extreme_attempt + 1} failed: {e_extreme}")
-                                continue
-                        
-                        # Method 4: Ultra-extreme teleportation (avoid vehicle destruction at all costs)
-                        if not teleportation_successful:
-                            print(f"⚠️  WARNING: Extreme teleportation failed")
-                            print(f"🔄 Attempting Method 4: Ultra-extreme teleportation (NO VEHICLE DESTRUCTION)...")
-                            try:
-                                # Try ultra-extreme measures without destroying vehicle
-                                for ultra_attempt in range(10):
-                                    try:
-                                        print(f"   Ultra attempt {ultra_attempt + 1}/10...")
-                                        
-                                        # Complete physics reset
-                                        self._ego_vehicle.set_simulate_physics(False)
-                                        time.sleep(0.5)
-                                        
-                                        # Try different extreme positions
-                                        ultra_x = safe_x + (ultra_attempt - 5) * 2.0  # Try positions around target
-                                        ultra_y = safe_y + (ultra_attempt - 5) * 2.0
-                                        ultra_z = safe_z + 15.0 + ultra_attempt * 3.0  # Very high Z
-                                        
-                                        ultra_transform = carla.Transform(
-                                            carla.Location(x=ultra_x, y=ultra_y, z=ultra_z),
-                                            carla.Rotation(pitch=0.0, yaw=safe_yaw, roll=0.0)
-                                        )
-                                        
-                                        # Force teleport
-                                        self._ego_vehicle.set_transform(ultra_transform)
-                                        time.sleep(0.5)
-                                        
-                                        # Re-enable physics
-                                        self._ego_vehicle.set_simulate_physics(True)
-                                        time.sleep(0.5)
-                                        
-                                        # Give many world ticks for settling
-                                        for _ in range(50):
-                                            self.world.tick()
-                                            time.sleep(0.05)
-                                        
-                                        # Check result
-                                        ultra_pos = self._ego_vehicle.get_transform().location
-                                        ultra_distance = math.sqrt(
-                                            (ultra_pos.x - safe_x)**2 + 
-                                            (ultra_pos.y - safe_y)**2
-                                        )
-                                        
-                                        print(f"   Position: ({ultra_pos.x:.2f}, {ultra_pos.y:.2f}, {ultra_pos.z:.2f})")
-                                        print(f"   Target distance: {ultra_distance:.2f}m")
-                                        
-                                        if ultra_distance < 15.0:  # Very lenient check
-                                            teleportation_successful = True
-                                            print(f"✅ Method 4 successful on ultra attempt {ultra_attempt + 1}!")
-                                            break
-                                            
-                                    except Exception as e_ultra:
-                                        print(f"   Ultra attempt {ultra_attempt + 1} failed: {e_ultra}")
-                                        continue
-                                
-                                # Method 5: Final resort - try to continue from current location
-                                if not teleportation_successful:
-                                    print(f"⚠️  WARNING: All teleportation methods failed")
-                                    print(f"🔄 Attempting Method 5: Continue from current location...")
-                                    try:
-                                        # Just try to get the vehicle moving again from current location
-                                        current_pos = self._ego_vehicle.get_transform().location
-                                        print(f"📍 Continuing from current position: ({current_pos.x:.2f}, {current_pos.y:.2f}, {current_pos.z:.2f})")
-                                        
-                                        # Reset physics and try to move
-                                        self._ego_vehicle.set_simulate_physics(False)
-                                        time.sleep(0.2)
-                                        self._ego_vehicle.set_simulate_physics(True)
-                                        time.sleep(0.2)
-                                        
-                                        # Give some world ticks
-                                        for _ in range(10):
-                                            self.world.tick()
-                                            time.sleep(0.05)
-                                        
-                                        print(f"✅ Method 5: Continuing from current location (no teleportation)")
-                                        teleportation_successful = True  # Accept current location
-                                        
-                                    except Exception as e5:
-                                        print(f"❌ Method 5 failed: {e5}")
-                                        # Try to find existing vehicle again
-                                        try:
-                                            vehicles = self.world.get_actors().filter('vehicle.ipex.ipex')
-                                            if len(vehicles) > 0:
-                                                self._ego_vehicle = vehicles[0]
-                                                print(f"🔍 Found existing vehicle, continuing...")
-                                        except:
-                                            pass
-                            
-                            except Exception as e4:
-                                print(f"❌ Method 4 failed: {e4}")
-                                # Try to find existing vehicle again
-                                try:
-                                    vehicles = self.world.get_actors().filter('vehicle.ipex.ipex')
-                                    if len(vehicles) > 0:
-                                        self._ego_vehicle = vehicles[0]
-                                        print(f"🔍 Found existing vehicle, continuing...")
-                                except:
-                                    pass
-                            
-                    except Exception as e3:
-                        print(f"❌ Method 3 failed: {e3}")
-                        # Try to find existing vehicle again
-                        try:
-                            vehicles = self.world.get_actors().filter('vehicle.ipex.ipex')
-                            if len(vehicles) > 0:
-                                self._ego_vehicle = vehicles[0]
-                                print(f"🔍 Found existing vehicle, continuing...")
-                        except:
-                            pass
-                
-                # Final status
-                if teleportation_successful:
-                    final_pos = self._ego_vehicle.get_transform().location
-                    final_distance = math.sqrt(
-                        (final_pos.x - safe_x)**2 + 
-                        (final_pos.y - safe_y)**2
-                    )
-                    print(f"🎉 TELEPORTATION SUCCESSFUL! Rover at ({final_pos.x:.2f}, {final_pos.y:.2f}) - {final_distance:.2f}m from target")
-                else:
-                    print(f"❌ ALL TELEPORTATION METHODS FAILED - continuing from current location")
-                    
-            else:
-                print(f"⚠️  No vehicle reference available for teleportation, continuing from current location")
-        except Exception as e:
-            print(f"⚠️  Teleportation error: {e}, continuing from current location")
-        
-        # Reset all collision and stuck detection states
-        self._collision_detected = False
-        self._stuck_counter = 0
-        self._position_history = []  # Clear position history
-        
-        # Reset action state
-        self._current_action = None
-        
-        # Start new trajectory from starting location
-        self.trajectory_generator.start_new_trajectory((safe_x, safe_y))
-        
-        print(f"🔄 All detection states reset, starting new trajectory from starting location")
-        print(f"🚀 Mission continues - rover ready to collect more data!")
+        # Raise exception to trigger mission restart instead of ending mission
+        from leaderboard.agents.agent_wrapper import AgentRuntimeError
+        raise AgentRuntimeError("Collision and stuck detected - restarting mission")
     
     def _manage_battery(self):
         """
@@ -1418,192 +1079,126 @@ class DataCollectionAgent(AutonomousAgent):
     def _handle_boundary_violation(self, current_position):
         """
         Handle the case where rover has exceeded map boundaries.
-        Save current trajectory and restart from a safe location.
+        Save current trajectory and raise exception to trigger mission restart.
         """
         distance_from_center = math.sqrt(current_position.x**2 + current_position.y**2)
         
         print("🗺️  MAP BOUNDARY VIOLATION!")
         print(f"🚨 Rover exceeded safety boundary: {distance_from_center:.2f}m (limit: {self._bounds_distance}m)")
         print(f"📍 Current position: ({current_position.x:.2f}, {current_position.y:.2f})")
-        print(f"📁 Force-saving current trajectory before restart (ignoring minimum length)...")
+        print(f"📁 Force-saving current trajectory before mission restart (ignoring minimum length)...")
         
         # Force save current trajectory data regardless of length
         self.data_logger.save_trajectory(force_save=True)
         
+        # Update global summary before restarting
+        self._update_global_summary()
+        
         # Get current statistics
         stats = self.data_logger.get_statistics()
         
-        print(f"🔄 RESTARTING ROVER from starting location instead of mission exit")
+        print(f"🔄 RESTARTING MISSION (raising exception to trigger restart)")
         print(f"📊 Current Progress:")
         print(f"   Trajectories collected so far: {stats['trajectories_saved']}")
         print(f"   Total logged steps: {stats['total_steps_collected']}")
         print(f"   Boundary violation location: ({current_position.x:.2f}, {current_position.y:.2f})")
         
-        # Restart rover from starting location
-        self._restart_from_safe_location()
+        # Raise exception to trigger mission restart instead of ending mission
+        from leaderboard.agents.agent_wrapper import AgentRuntimeError
+        raise AgentRuntimeError("Boundary violation detected - restarting mission")
     
-    def _find_mission_components(self):
-        """Try to find mission system components to update vehicle references after respawn"""
+    def _update_global_summary(self):
+        """Create or update global summary across all missions"""
         try:
-            # Look for mission components in the global scope or module attributes
-            import sys
-            import gc
+            # Get the main data_collection directory (parent of current mission directory)
+            main_data_dir = os.path.dirname(self.data_logger.save_dir)
+            if not main_data_dir.endswith('data_collection'):
+                # Fallback to default if not in expected structure
+                main_data_dir = "data_collection"
             
-            # Search through all objects in memory for mission components
-            for obj in gc.get_objects():
-                try:
-                    # Look for MissionSpawner
-                    if hasattr(obj, 'ego_vehicle') and hasattr(obj, '_world') and hasattr(obj, '_bp_lib'):
-                        if obj.__class__.__name__ == 'MissionSpawner':
-                            self._mission_spawner = obj
-                            print("🔍 Found MissionSpawner for vehicle reference updates")
-                            # Also get lander reference from spawner
-                            if hasattr(obj, 'lander') and obj.lander is not None:
-                                self._lander = obj.lander
-                                print("🔍 Found lander reference from MissionSpawner")
-                    
-                    # Look for MissionManager
-                    if hasattr(obj, '_ego_vehicle') and hasattr(obj, '_world') and hasattr(obj, '_behaviors'):
-                        if obj.__class__.__name__ == 'MissionManager':
-                            self._mission_manager = obj
-                            print("🔍 Found MissionManager for vehicle reference updates")
-                    
-                    # Look for MissionBehaviors
-                    if hasattr(obj, '_ego_vehicle') and hasattr(obj, '_world') and hasattr(obj, '_current_power'):
-                        if obj.__class__.__name__ == 'MissionBehaviors':
-                            self._mission_behaviors = obj
-                            print("🔍 Found MissionBehaviors for vehicle reference updates")
-                            # Also get lander reference from behaviors
-                            if hasattr(obj, '_lander') and obj._lander is not None:
-                                self._lander = obj._lander
-                                print("🔍 Found lander reference from MissionBehaviors")
-                    
-                    # Look for AgentWrapper (more flexible search)
-                    if hasattr(obj, '_vehicle') and hasattr(obj, 'agent'):
-                        if obj.__class__.__name__ == 'AgentWrapper':
-                            self._agent_wrapper = obj
-                            print("🔍 Found AgentWrapper for vehicle reference updates")
-                            
-                except (AttributeError, TypeError):
-                    continue
+            # Find all mission directories
+            mission_dirs = []
+            if os.path.exists(main_data_dir):
+                for item in os.listdir(main_data_dir):
+                    item_path = os.path.join(main_data_dir, item)
+                    if os.path.isdir(item_path) and item.startswith('mission_'):
+                        mission_dirs.append(item_path)
             
-            # Also try to find lander directly from world if not found yet
-            if self._lander is None and self.world is not None:
-                try:
-                    lander_actors = self.world.get_actors().filter('*lander*')
-                    if len(lander_actors) > 0:
-                        self._lander = lander_actors[0]
-                        print("🔍 Found lander reference directly from world")
-                except Exception as e:
-                    print(f"⚠️  Could not find lander reference: {e}")
-                    
-            if self._mission_spawner:
-                print("✅ Mission system components found - vehicle respawn will update all references")
-            else:
-                print("⚠️  Mission system components not found - vehicle respawn may cause issues")
+            # Collect statistics from all missions
+            total_trajectories = 0
+            total_logged_steps = 0
+            total_simulation_steps = 0
+            mission_details = []
+            
+            for mission_dir in sorted(mission_dirs):
+                mission_name = os.path.basename(mission_dir)
                 
-        except Exception as e:
-            print(f"⚠️  Error finding mission components: {e}")
-    
-    def _update_mission_vehicle_references(self, new_vehicle):
-        """Update vehicle references in all mission system components after respawn"""
-        try:
-            if new_vehicle is None:
-                print("⚠️  Cannot update mission references with None vehicle")
-                return False
+                # Count trajectories in this mission
+                mission_trajectories = len([f for f in os.listdir(mission_dir) if f.endswith('.npz')])
+                total_trajectories += mission_trajectories
                 
-            success_count = 0
-            
-            # Update MissionSpawner
-            if self._mission_spawner is not None:
-                try:
-                    self._mission_spawner.ego_vehicle = new_vehicle
-                    success_count += 1
-                    print("✅ Updated MissionSpawner vehicle reference")
-                except Exception as e:
-                    print(f"❌ Failed to update MissionSpawner: {e}")
-            
-            # Update MissionManager
-            if self._mission_manager is not None:
-                try:
-                    self._mission_manager._ego_vehicle = new_vehicle
-                    success_count += 1
-                    print("✅ Updated MissionManager vehicle reference")
-                except Exception as e:
-                    print(f"❌ Failed to update MissionManager: {e}")
-            
-            # Update MissionBehaviors
-            if self._mission_behaviors is not None:
-                try:
-                    self._mission_behaviors._ego_vehicle = new_vehicle
-                    success_count += 1
-                    print("✅ Updated MissionBehaviors vehicle reference")
-                except Exception as e:
-                    print(f"❌ Failed to update MissionBehaviors: {e}")
-            
-            # Update AgentWrapper
-            if self._agent_wrapper is not None:
-                try:
-                    self._agent_wrapper._vehicle = new_vehicle
-                    success_count += 1
-                    print("✅ Updated AgentWrapper vehicle reference")
-                except Exception as e:
-                    print(f"❌ Failed to update AgentWrapper: {e}")
-            
-            print(f"📊 Mission reference update summary: {success_count}/4 components updated")
-            
-            # Also update lander references if needed
-            if self._lander is not None:
-                try:
-                    # Update lander reference in MissionBehaviors if it exists
-                    if self._mission_behaviors is not None and hasattr(self._mission_behaviors, '_lander'):
-                        self._mission_behaviors._lander = self._lander
-                        print("✅ Updated MissionBehaviors lander reference")
-                    
-                    # Update lander reference in MissionSpawner if it exists
-                    if self._mission_spawner is not None and hasattr(self._mission_spawner, 'lander'):
-                        self._mission_spawner.lander = self._lander
-                        print("✅ Updated MissionSpawner lander reference")
+                # Read mission summary if available
+                mission_summary_path = os.path.join(mission_dir, "mission_summary.json")
+                if os.path.exists(mission_summary_path):
+                    try:
+                        with open(mission_summary_path, 'r') as f:
+                            mission_data = json.load(f)
                         
-                except Exception as e_lander:
-                    print(f"⚠️  Error updating lander references: {e_lander}")
-            
-            return success_count > 0
-            
-        except Exception as e:
-            print(f"❌ Error updating mission vehicle references: {e}")
-            return False
-    
-    def _refresh_lander_references(self):
-        """Refresh lander references if they become invalid"""
-        try:
-            if self.world is not None:
-                # Try to find lander directly from world
-                lander_actors = self.world.get_actors().filter('*lander*')
-                if len(lander_actors) > 0:
-                    new_lander = lander_actors[0]
-                    
-                    # Update our reference
-                    self._lander = new_lander
-                    
-                    # Update mission system references
-                    if self._mission_behaviors is not None and hasattr(self._mission_behaviors, '_lander'):
-                        self._mission_behaviors._lander = new_lander
-                        print("🔄 Refreshed MissionBehaviors lander reference")
-                    
-                    if self._mission_spawner is not None and hasattr(self._mission_spawner, 'lander'):
-                        self._mission_spawner.lander = new_lander
-                        print("🔄 Refreshed MissionSpawner lander reference")
-                    
-                    print("✅ Successfully refreshed lander references")
-                    return True
+                        total_logged_steps += mission_data.get('total_logged_steps', 0)
+                        total_simulation_steps += mission_data.get('total_simulation_steps', 0)
+                        
+                        mission_details.append({
+                            'mission_name': mission_name,
+                            'trajectories': mission_trajectories,
+                            'logged_steps': mission_data.get('total_logged_steps', 0),
+                            'simulation_steps': mission_data.get('total_simulation_steps', 0),
+                            'duration_hours': mission_data.get('recording_duration_hours', 0),
+                            'completion_time': mission_data.get('completion_time', 'unknown')
+                        })
+                    except Exception as e:
+                        print(f"⚠️  Error reading mission summary {mission_summary_path}: {e}")
+                        mission_details.append({
+                            'mission_name': mission_name,
+                            'trajectories': mission_trajectories,
+                            'logged_steps': 0,
+                            'simulation_steps': 0,
+                            'duration_hours': 0,
+                            'completion_time': 'unknown'
+                        })
                 else:
-                    print("⚠️  No lander found in world")
-                    return False
-            else:
-                print("⚠️  No world reference available")
-                return False
-                    
+                    mission_details.append({
+                        'mission_name': mission_name,
+                        'trajectories': mission_trajectories,
+                        'logged_steps': 0,
+                        'simulation_steps': 0,
+                        'duration_hours': 0,
+                        'completion_time': 'unknown'
+                    })
+            
+            # Create global summary
+            global_summary = {
+                'total_missions': len(mission_dirs),
+                'total_trajectories': total_trajectories,
+                'total_logged_steps': total_logged_steps,
+                'total_simulation_steps': total_simulation_steps,
+                'camera_sync_ratio': total_logged_steps / max(total_simulation_steps, 1),
+                'total_recording_hours': sum(m.get('duration_hours', 0) for m in mission_details),
+                'mission_details': mission_details,
+                'last_updated': datetime.datetime.now().isoformat(),
+                'data_structure': 'Each mission has its own directory (mission_1, mission_2, etc.)',
+                'synchronization_note': 'Data logged only when CARLA camera data available (10Hz camera, 20Hz sim)',
+                'imu_enhancement': 'Dual-timestep IMU: [previous_step + current_step] for richer dynamics'
+            }
+            
+            # Save global summary
+            global_summary_path = os.path.join(main_data_dir, "collection_summary.json")
+            with open(global_summary_path, 'w') as f:
+                json.dump(global_summary, f, indent=2)
+            
+            print(f"Global summary updated: {global_summary_path}")
+            print(f"📊 Total across all missions: {total_trajectories} trajectories, {total_logged_steps} logged steps")
+            
         except Exception as e:
-            print(f"❌ Error refreshing lander references: {e}")
-            return False 
+            print(f"⚠️  Error updating global summary: {e}")
+    
+ 
