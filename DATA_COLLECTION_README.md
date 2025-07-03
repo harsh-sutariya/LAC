@@ -4,60 +4,71 @@ This system implements autonomous data collection for training a latent world mo
 
 ## Overview
 
-The data collection system consists of three main components:
+The data collection system consists of two main components:
 
-1. **`agents/data_collection_agent.py`** - Autonomous agent that collects training data with comprehensive validation
-2. **Leaderboard execution** - Run with `./RunLeaderboard.sh --agent=agents.data_collection_agent`
-3. **`load_trajectory_example.py`** - Analysis and visualization of collected data
+1. **`RunContinuousDataCollection.sh`** - Bash script that runs missions in a continuous loop with automatic restart on failures
+2. **`agents/data_collection_agent.py`** - Autonomous agent that collects training data with comprehensive validation
 
-### 🚨 Safety Features: Collision Detection & Emergency Exit
+The system automatically restarts missions when collisions, boundary violations, or other failures occur, ensuring maximum data collection with diverse environments.
+
+### 🚨 Safety Features: Collision Detection & Emergency Restart
 
 The system includes robust safety mechanisms to handle collision scenarios:
 
 - **IMU-based collision detection**: Monitors acceleration magnitude to detect impacts with rocks/obstacles
-- **Stuck detection**: Tracks position changes over 70 consecutive steps to identify when rover is immobilized
-- **Map boundary enforcement**: Prevents rover from exiting the 27m×27m map area with safety boundaries
+- **Stuck detection**: Tracks position changes over 100 consecutive steps to identify when rover is immobilized
+- **Map boundary enforcement**: Monitors rover position within the 27m×27m map area with safety boundaries
 - **Emergency restart protocol**: When collision+stuck OR boundary violation occurs, the system:
   - **Force-saves current trajectory data immediately** (ignoring minimum length requirement)
-  - **Teleports rover to a safe location** (2-8m from map center with random orientation)
-  - **Resets all detection states** and starts new trajectory
-  - **Continues mission** for maximum data collection instead of exiting
+  - **Restarts the entire mission** with a new random seed and map/preset combination
+  - **Creates a new mission directory** to avoid overwriting previous data
+  - **Initializes simulator** before each restart for clean state
 - **Configurable thresholds**: 
   - Collision threshold: 15.0 m/s² acceleration magnitude
-  - Stuck threshold: <0.05m movement over 70 steps
-  - Map boundary: 19.5m radius safety limit, 17.0m warning threshold
+  - Stuck threshold: <0.05m movement over 100 steps
+  - Map boundary: 19.5m radius safety limit (no steering correction - allows boundary crossing)
 - **Real-time monitoring**: All safety checks run every simulation step for immediate response
-- **Boundary avoidance**: When approaching boundaries, rover STOPS forward movement and steers toward map center
+- **Mission diversity**: Each restart uses randomized maps, presets, and spawn points for maximum data variety
 
 ## Quick Start
 
-### 1. Run Data Collection
+### 1. Run Continuous Data Collection
 
 ```bash
-# Run the data collection with the leaderboard system (5-hour collection)
-./RunLeaderboard.sh --agent=agents.data_collection_agent
+# Run the continuous data collection system
+./RunContinuousDataCollection.sh
 
-# The agent will automatically:
+# The system will automatically:
+# - Run missions continuously until target trajectory count is reached
+# - Use randomized maps (Moon_Map_01, Moon_Map_02) and presets for diversity
+# - Create separate directories for each mission attempt
+# - Restart missions on collisions, boundary violations, or other failures
+# - Initialize simulator before each restart for clean state
 # - Collect diverse trajectory types (random_walk, directed_move, turning_maneuvers, etc.)
-# - Run for 5 hours of recording time (configurable)
 # - Save only trajectories with ≥99 logged steps (shorter ones are discarded)
 # - Ensure each trajectory file contains only ONE trajectory type
 # - Validate and correct all data shapes automatically
-# - Handle collisions and boundary violations with automatic recovery
+# - Handle failures with automatic mission restart
 ```
 
-### Collection Duration Configuration
+### Collection Target Configuration
 
-The current collection target is set to **5 hours** in `agents/data_collection_agent.py`:
+The current collection target is set to **1000 trajectories** in `RunContinuousDataCollection.sh`:
 
-```python
-self.target_collection_hours = 5.0  # Target collection time in hours
+```bash
+# Continue if we have less than 1000 trajectories (adjust as needed)
+if [ $trajectory_count -lt 1000 ]; then
+    return 0  # Continue
+else
+    echo "🎯 Target trajectory count reached! Stopping continuous collection."
+    return 1  # Stop
+fi
 ```
 
-To modify the collection duration:
-- **Shorter collection**: Change to `2.0` for 2 hours
-- **Longer collection**: Change to `10.0` for 10 hours (as recommended in plan.md)
-- **Full dataset**: Change to `20.0` for 20 hours for comprehensive training data
+To modify the collection target:
+- **Shorter collection**: Change to `500` for 500 trajectories
+- **Longer collection**: Change to `2000` for 2000 trajectories
+- **Full dataset**: Change to `5000` for comprehensive training data
 
 ### 2. Analyze Collected Data
 
@@ -74,7 +85,18 @@ python load_trajectory_example.py
 
 ## Data Collection Strategy
 
-Based on the plan in `plan.md`, the system implements diverse trajectory generation with strict quality control:
+Based on the plan in `plan.md`, the system implements diverse trajectory generation with strict quality control and maximum environment variety:
+
+### Mission Diversity
+
+The system ensures maximum data diversity through:
+
+1. **Randomized Maps**: Cycles through `Moon_Map_01` and `Moon_Map_02`
+2. **Randomized Presets**: 
+   - `Moon_Map_01`: Presets 0-10 (11 options)
+   - `Moon_Map_02`: Presets 11-13 (3 options)
+3. **Randomized Seeds**: Each mission uses timestamp + attempt number for unique spawn points
+4. **Mission Isolation**: Each mission gets its own directory to prevent data overwrites
 
 ### Trajectory Types
 
@@ -91,7 +113,8 @@ Based on the plan in `plan.md`, the system implements diverse trajectory generat
 - **Automatic Validation**: All data shapes are validated and corrected automatically
 - **Camera Synchronization**: Data logged only when CARLA camera data is available (10Hz)
 - **Emergency Preservation**: Collision/boundary violations force-save any collected data regardless of length
-- **Automatic Recovery**: Rover teleports to safe locations and continues mission instead of terminating
+- **Mission Restart**: Failed missions restart with new environment and spawn point instead of continuing
+- **Data Isolation**: Each mission's data is saved in separate directories to prevent overwrites
 
 ### Data Collected
 
@@ -109,12 +132,17 @@ After collection, your data directory will look like:
 
 ```
 data_collection/
-├── trajectory_0.npz           # Pure trajectory type (e.g., turning_maneuvers)
-├── trajectory_1.npz           # Pure trajectory type (e.g., random_walk)
-├── trajectory_2.npz           # Pure trajectory type (e.g., directed_move)
-├── trajectory_3.npz           # Pure trajectory type (e.g., exploration)
-└── ...
-└── collection_summary.json    # Overall collection statistics
+├── mission_1/                 # First mission attempt
+│   ├── trajectory_0.npz       # Pure trajectory type (e.g., turning_maneuvers)
+│   ├── trajectory_1.npz       # Pure trajectory type (e.g., random_walk)
+│   └── ...
+├── mission_2/                 # Second mission attempt (different map/preset)
+│   ├── trajectory_0.npz       # Pure trajectory type (e.g., directed_move)
+│   ├── trajectory_1.npz       # Pure trajectory type (e.g., exploration)
+│   └── ...
+├── mission_3/                 # Third mission attempt
+│   └── ...
+└── collection_summary.json    # Overall collection statistics across all missions
 ```
 
 Each `.npz` file contains validated data for a single trajectory type:
@@ -133,14 +161,14 @@ Each `.npz` file contains validated data for a single trajectory type:
 You can modify these parameters in `agents/data_collection_agent.py`:
 
 ```python
-# Collection duration
-self.target_collection_hours = 5.0
-
 # Save frequency (steps between trajectory saves)
 self.save_frequency = 100
 
 # Minimum trajectory length (shorter trajectories discarded)
 self.min_trajectory_length = 99
+
+# Stuck detection threshold (steps)
+self.stuck_threshold = 100
 
 # Image resolution
 self._width = 640
@@ -149,6 +177,22 @@ self._height = 480
 # Trajectory generation parameters
 max_linear_speed = 0.4    # m/s
 max_angular_speed = 0.5   # rad/s
+```
+
+### Continuous Collection Parameters
+
+You can modify these parameters in `RunContinuousDataCollection.sh`:
+
+```bash
+# Target trajectory count (when to stop collection)
+if [ $trajectory_count -lt 1000 ]; then
+    return 0  # Continue
+fi
+
+# Available maps and presets
+AVAILABLE_MAPS=("Moon_Map_01" "Moon_Map_02")
+MOON_MAP_01_PRESETS=("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "10")
+MOON_MAP_02_PRESETS=("11" "12" "13")
 ```
 
 ### Data Validation Settings
@@ -232,16 +276,18 @@ pip install numpy matplotlib scipy
 ### Basic Data Collection
 
 ```bash
-# 1. Start CARLA with lunar environment
-# 2. Run collection (will run for 5 hours)
-./RunLeaderboard.sh --agent=agents.data_collection_agent
+# Run continuous data collection (will run until target trajectory count reached)
+./RunContinuousDataCollection.sh
 
 # System will automatically:
-# - Collect diverse trajectory types for 5 hours
+# - Run missions continuously with randomized maps and presets
+# - Create separate directories for each mission attempt
+# - Restart missions on failures with simulator initialization
+# - Collect diverse trajectory types across different environments
 # - Validate all data shapes
 # - Save only quality trajectories (≥99 steps)
 # - Discard partial/incomplete trajectories
-# - Handle collisions and boundary violations with automatic recovery
+# - Handle failures with automatic mission restart
 ```
 
 ### Data Analysis
@@ -261,12 +307,14 @@ python load_trajectory_example.py
 
 Based on the plan.md targets with quality control:
 
-- **Target**: 5 hours for current collection (configurable up to 10-20 hours for full dataset)
+- **Target**: 1000 trajectories for current collection (configurable up to 2000-5000 for full dataset)
 - **Quality**: Only trajectories with ≥99 logged steps
 - **Purity**: Each file contains only one trajectory type
+- **Diversity**: Multiple maps (Moon_Map_01, Moon_Map_02) with different presets
 - **Frame Rate**: ~5-10 Hz (when camera data available)
-- **Total Frames**: ~90k-180k for 5 hours at 5-10 Hz
-- **Estimated Size**: ~5 GB for 5 hours
+- **Total Frames**: ~99k-990k for 1000 trajectories at 99-990 steps each
+- **Estimated Size**: ~10-50 GB for 1000 trajectories (depending on trajectory lengths)
+- **Mission Isolation**: Each mission's data stored in separate directories
 
 ## Integration with World Model Training
 
@@ -350,15 +398,25 @@ The system includes comprehensive validation:
 2. **Camera Sync**: ~50% of simulation steps have camera data (this is normal)
 3. **Data Shapes**: All shapes automatically validated and corrected
 4. **Performance**: Validation adds minimal overhead
+5. **Mission Failures**: System automatically restarts with new environment (this is expected)
+6. **Simulator Issues**: System reinitializes simulator before each restart
 
 ### Monitoring Collection
 
 Enhanced status messages show:
 
 ```
+🔄 Continuous Data Collection - Attempt 1
+🚀 Starting leaderboard execution (attempt 1)...
+🗺️  Using map: Moon_Map_01 with preset: 5
+📁 Mission data directory: /path/to/data_collection/mission_1
+🎲 Using random seed: 1703123456
 🗑️ DISCARDING partial trajectory with only 45 steps (minimum: 99)
 ✅ Saved trajectory 0 with 156 steps to trajectory_0.npz
 📏 Final shapes: img(156, 480, 640), imu(156, 12), pose(156, 6), action(156, 2)
+⚠️  Leaderboard detected failure (exit code: 1)
+🔄 This is expected for collision/boundary violations - restarting...
+🚀 Initializing Lunar Simulator before restart...
 ```
 
 ### Data Quality Validation
