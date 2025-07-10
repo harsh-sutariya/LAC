@@ -123,6 +123,9 @@ wandb/
 tensorboard/
 *.log
 
+# IMU Autoencoder results
+imu-pretraining/imu_autoencoder_results/
+
 # Captured data
 captured_images/
 captured_data/
