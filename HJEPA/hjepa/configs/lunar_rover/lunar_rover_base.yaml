@@ -6,7 +6,7 @@ base_lr: 0.001
 data:
   normalize: true
   min_max_normalize_state: false
-  dataset_type: DatasetType.LunarRover
+  dataset_type: LunarRover
   lunar_rover_config:
     data_dir: "data_collection"  # Path to your lunar rover data
     batch_size: 32
