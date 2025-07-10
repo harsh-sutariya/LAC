@@ -230,3 +230,6 @@ docs/_build/
 # Data collection
 data_collection/
 plan.md
+
+# Analysis
+analysis_plots/
