@@ -1,0 +1,8 @@
+bash_*
+*.sbatch
+logs/
+.vscode/
+checkpoint/
+*__pycache__*
+*.ipynb_checkpoints/
+*.npz

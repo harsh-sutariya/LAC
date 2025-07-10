@@ -1,0 +1,134 @@
+n_steps: &n_steps 8  # Shorter sequences for debugging
+val_n_steps: *n_steps
+env_name: &env_name lunar_rover
+
+base_lr: 0.001
+data:
+  normalize: true
+  min_max_normalize_state: false
+  dataset_type: DatasetType.LunarRover
+  lunar_rover_config:
+    data_dir: "data_collection"  # Path to your lunar rover data
+    batch_size: 4  # Small batch size for debugging
+    n_steps: *n_steps
+    img_size: 128  # Smaller images for faster processing
+    num_workers: 1
+    max_trajectories: 5  # Limit trajectories for quick testing
+    trajectory_subsample: 2  # Use every other frame
+    normalize_actions: true
+    normalize_positions: true
+    quick_debug: true
+    train: true
+    val_fraction: 0.3
+    
+epochs: 3  # Few epochs for debugging
+eval_at_beginning: false
+eval_during_training: false
+eval_every_n_epochs: 1
+eval_mpcs: 5
+eval_only: false
+
+hjepa:
+  train_l1: true
+  freeze_l1: false
+  disable_l2: true  # Start with single level
+  l1_n_steps: *n_steps
+  level1:
+    backbone:
+      arch: lunar_rover
+      # Pretrained model paths
+      imu_encoder_path: "imu-pretraining/imu_autoencoder_results/imu_autoencoder_latent32.pth"
+      imu_scaler_path: "imu-pretraining/imu_autoencoder_results/imu_scaler.pkl"
+      image_size: [128, 128]  # Smaller for debugging
+      freeze_vision_encoder: true  # Keep SD VAE frozen
+      freeze_imu_encoder: true     # Keep IMU encoder frozen
+      output_dim: 256  # Smaller for debugging
+      final_ln: true
+      dropout: 0.1
+    predictor:
+      predictor_arch: mlp_v2
+      predictor_subclass: "256-256"  # Smaller for debugging
+      z_dim: 0  # No latent actions initially
+      z_min_std: 0.1
+      residual: true
+      predictor_ln: true
+      tie_backbone_ln: true
+      dropout: 0.1
+      ensemble_size: 1
+      use_vmap: false
+    action_dim: 2  # [linear_velocity, angular_velocity]
+    momentum: 0.0  # No EMA initially
+    
+  step_skip: 2  # Smaller step skip for debugging
+
+load_checkpoint_path: null
+load_l1_only: false
+
+# Training objectives
+objectives_l1:
+  objectives:
+  - VICReg  # Joint embedding predictive objective
+  - IDM     # Inverse dynamics model for action prediction
+  
+  # VICReg loss for learning representations
+  vicreg:
+    projector: id
+    random_projector: false
+    sim_coeff: 1.0      # Similarity loss coefficient
+    std_coeff: 10.0     # Smaller coeffs for debugging
+    cov_coeff: 10.0     # Smaller coeffs for debugging
+    std_coeff_t: 10.0   # Temporal variance loss
+    cov_coeff_t: 1.0    # Temporal covariance loss
+    sim_coeff_t: 10.0   # Temporal similarity loss
+    cov_per_feature: false
+    adjust_cov: true
+    cov_chunk_size: null
+    std_margin: 1.0
+    std_margin_t: 1.0
+    
+  # Inverse dynamics model for action prediction
+  idm:
+    coeff: 1.0
+    action_dim: 2
+    arch: "256-128"  # Smaller for debugging
+    arch_subclass: a
+    use_pred: false
+
+# Optimizer settings  
+optimizer_type: Adam
+optimizer_schedule: Constant  # Keep constant for debugging
+
+# Output settings
+output_dir: lunar_rover_debug
+output_root: "./checkpoints"
+run_name: lunar_rover_jepa_debug
+run_project: "HJEPA-lunar-rover-debug"
+wandb: false  # Disable wandb for debugging
+
+# Evaluation settings
+eval_cfg:
+  env_name: *env_name
+  # Probing settings
+  probing:
+    visualize_probing: false
+    probe_mpc: false
+    probe_encoder: true
+    epochs: 2  # Shorter for debugging
+    epochs_enc: 2
+    full_finetune: false
+    lr: 0.001
+    probe_targets: "locations,proprio_vel"  # Probe relative position and IMU
+    locations:
+      arch: "256-128"  # Smaller for debugging
+    proprio_vel:
+      arch: "256-128"
+    schedule: Constant
+    l1_depth: *n_steps
+    sample_timesteps: 10  # Fewer for debugging
+
+# General settings
+quick_debug: true
+seed: 42
+save_every_n_epochs: 1
+resume_if_possible: false  # Don't resume for debugging
+compile_model: false  # Disable compilation for easier debugging 

@@ -1,0 +1,134 @@
+n_steps: &n_steps 16
+val_n_steps: *n_steps
+env_name: &env_name lunar_rover
+
+base_lr: 0.001
+data:
+  normalize: true
+  min_max_normalize_state: false
+  dataset_type: DatasetType.LunarRover
+  lunar_rover_config:
+    data_dir: "data_collection"  # Path to your lunar rover data
+    batch_size: 32
+    n_steps: *n_steps
+    img_size: 256
+    num_workers: 4
+    max_trajectories: null  # Use all available trajectories
+    trajectory_subsample: 1  # Use every frame
+    normalize_actions: true
+    normalize_positions: true
+    quick_debug: false
+    train: true
+    val_fraction: 0.2
+    
+epochs: 50
+eval_at_beginning: false
+eval_during_training: false
+eval_every_n_epochs: 10
+eval_mpcs: 20
+eval_only: false
+
+hjepa:
+  train_l1: true
+  freeze_l1: false
+  disable_l2: true  # Start with single level
+  l1_n_steps: *n_steps
+  level1:
+    backbone:
+      arch: lunar_rover
+      # Pretrained model paths
+      imu_encoder_path: "imu-pretraining/imu_autoencoder_results/imu_autoencoder_latent32.pth"
+      imu_scaler_path: "imu-pretraining/imu_autoencoder_results/imu_scaler.pkl"
+      image_size: [256, 256]
+      freeze_vision_encoder: true  # Keep SD VAE frozen
+      freeze_imu_encoder: true     # Keep IMU encoder frozen
+      output_dim: 512
+      final_ln: true
+      dropout: 0.1
+    predictor:
+      predictor_arch: mlp_v2
+      predictor_subclass: "512-512-512"
+      z_dim: 0  # No latent actions initially
+      z_min_std: 0.1
+      residual: true
+      predictor_ln: true
+      tie_backbone_ln: true
+      dropout: 0.1
+      ensemble_size: 1
+      use_vmap: false
+    action_dim: 2  # [linear_velocity, angular_velocity]
+    momentum: 0.0  # No EMA initially
+    
+  step_skip: 4
+
+load_checkpoint_path: null
+load_l1_only: false
+
+# Training objectives
+objectives_l1:
+  objectives:
+  - VICReg  # Joint embedding predictive objective
+  - IDM     # Inverse dynamics model for action prediction
+  
+  # VICReg loss for learning representations
+  vicreg:
+    projector: id
+    random_projector: false
+    sim_coeff: 1.0      # Similarity loss coefficient
+    std_coeff: 25.0     # Variance loss coefficient  
+    cov_coeff: 25.0     # Covariance loss coefficient
+    std_coeff_t: 25.0   # Temporal variance loss
+    cov_coeff_t: 1.0    # Temporal covariance loss
+    sim_coeff_t: 25.0   # Temporal similarity loss
+    cov_per_feature: false
+    adjust_cov: true
+    cov_chunk_size: null
+    std_margin: 1.0
+    std_margin_t: 1.0
+    
+  # Inverse dynamics model for action prediction
+  idm:
+    coeff: 1.0
+    action_dim: 2
+    arch: "512-256"
+    arch_subclass: a
+    use_pred: false
+
+# Optimizer settings  
+optimizer_type: Adam
+optimizer_schedule: Cosine
+
+# Output settings
+output_dir: lunar_rover_world_model
+output_root: "./checkpoints"
+run_name: lunar_rover_jepa_base
+run_project: "HJEPA-lunar-rover"
+wandb: true
+
+# Evaluation settings
+eval_cfg:
+  env_name: *env_name
+  # Probing settings
+  probing:
+    visualize_probing: false
+    probe_mpc: false
+    probe_encoder: true
+    epochs: 5
+    epochs_enc: 5
+    full_finetune: false
+    lr: 0.0002
+    probe_targets: "locations,proprio_vel"  # Probe relative position and IMU
+    locations:
+      arch: "512-256"
+    proprio_vel:
+      arch: "512-256"
+    schedule: Constant
+    l1_depth: *n_steps
+    sample_timesteps: 30
+
+# General settings
+quick_debug: false
+seed: 42
+save_every_n_epochs: 10
+resume_if_possible: true
+compile_model: true 

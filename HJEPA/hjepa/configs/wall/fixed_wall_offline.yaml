@@ -1,0 +1,219 @@
+n_steps: &n_steps 17
+val_n_steps: *n_steps
+env_name: &env_name wall
+
+base_lr: 0.0076658
+data:
+  dataset_type: DatasetType.Wall
+  dot_config:
+    action_bias_only: false
+    action_noise: 1
+    batch_size: 128
+    device: cuda
+    dot_std: 1.3
+    img_size: 28
+    max_step: 1
+    n_steps: *n_steps
+    noise: 0
+    normalize: true
+    size: 10000
+    static_noise: 0
+    static_noise_speed: 0
+    structured_noise: false
+    structured_noise_path: /tmp/cifar10
+    train: true
+    zero_action: false
+    repeat_actions: 1
+    border_wall_loc: 5
+  offline_wall_config:
+    use_offline: true
+    offline_data_path: '/vast/wz1232/wall/3_2M_fixed/train'
+    lazy_load: true
+    batch_size: 64
+    device: cuda
+    img_size: 65
+    normalize: true
+    train: true
+    normalizer_hardset: false
+  wall_config:
+    action_bias_only: false
+    action_noise: 1
+    action_angle_noise: 0.2
+    action_step_mean: 1.0
+    action_step_std: 0.4
+    action_lower_bd: 0.2
+    action_upper_bd: 1.8
+    action_param_xy: true
+    batch_size: 64
+    device: cuda
+    dot_std: 1.3
+    border_wall_loc: 5
+    fix_wall_batch_k: null
+    fix_wall: true
+    fix_door_location: 10
+    fix_wall_location: 32
+    exclude_wall_train: ''
+    exclude_door_train: ''
+    only_wall_val: ''
+    only_door_val: ''
+    wall_padding: 20
+    door_padding: 10
+    wall_width: 3
+    door_space: 4
+    num_train_layouts: -1
+    cross_wall_rate: 0.08
+    expert_cross_wall_rate: 0
+    img_size: 65
+    max_step: 1
+    n_steps: *n_steps
+    n_steps_reduce_factor: 1
+    noise: 0
+    normalize: true
+    size: 20000
+    val_size: 10000
+    static_noise: 0
+    static_noise_speed: 0
+    structured_noise: false
+    structured_noise_path: /tmp/cifar10
+    train: true
+    zero_action: false
+    repeat_actions: 1
+    normalizer_hardset: false
+epochs: 10
+eval_at_beginning: false
+eval_during_training: false
+eval_mpcs: 20
+eval_only: false
+hjepa:
+  train_l1: true
+  freeze_l1: false
+  disable_l2: true
+  l1_n_steps: *n_steps
+  level1:
+    backbone:
+      arch: menet6
+      backbone_subclass: i
+      backbone_mlp: null
+      backbone_norm: group_norm #group_norm, batch_norm
+      backbone_pool: dim_reduce #dim_reduce, avg_pool
+      backbone_final_fc: false
+      backbone_width_factor: 2
+      channels: 2
+      input_dim: null
+    predictor:
+      predictor_arch: conv2
+      rnn_layers: 1
+      z_dim: 0
+      z_min_std: 0.1
+    action_dim: 2
+    momentum: 0
+  step_skip: 4
+load_checkpoint_path: null
+load_l1_only: false
+objectives_l1:
+  idm:
+    action_dim: 2
+    coeff: 4.359
+    arch: '512'
+  kl:
+    global_coeff: 1
+    global_prior: true
+  laplacian:
+    c: 1
+    detach_predictor: true
+    discount: 0.9
+    generalized: false
+    global_coeff: 1
+    negative_coeff: 1
+    predictor_coeff: 0
+    projector: id
+    random_projector: false
+    reg: 0
+    remove_d: false
+    split_batch: false
+  objectives:
+  - ObjectiveType.VICReg
+  - ObjectiveType.IDM
+  reconstruction:
+    channels: 1
+    decoder_arch: menet5
+    img_size: 28
+    plot_every: 50000
+    pred_coeff: 1
+    rec_coeff: 1
+    target_repr_dim: null
+    width_factor: 1
+  vicreg:
+    adjust_cov: true
+    cov_chunk_size: null
+    cov_coeff: 0.90414
+    cov_coeff_t: 0
+    projector: 'id'
+    random_projector: false
+    sim_coeff: 1
+    std_coeff: 12.737
+    std_coeff_t: 0.61955
+    std_margin: 1
+    std_margin_t: 1
+optimizer_type: Adam
+output_dir: test
+output_root: /scratch/wz1232/HJEPA/checkpoint
+eval_cfg:
+  env_name: *env_name
+  log_heatmap: false
+  wall_planning:
+    n_envs: 200
+    seed: 42
+    levels: "medium"
+    easy:
+      n_steps: 48
+      n_envs: 100
+      max_plan_length: 26
+      override_config: true
+    medium:
+      n_steps: 96
+      n_envs: 100
+      max_plan_length: 96
+      override_config: true
+    n_envs_batch_size: 20
+    n_steps: 96
+    level1:  
+      planner_type: PlannerType.MPPI
+      max_step: 2.45
+      min_step: 0
+      repr_target: true
+      loss_coeff_first: 0.1
+      loss_coeff_last: 1
+      sum_all_diffs: false
+      max_plan_length: 96
+      sgd:
+        lr: 0.3
+        n_iters: 900
+        l2_reg: 0
+        action_change_reg: 0
+        z_reg_coeff: 0
+      mppi:
+        noise_sigma: 5
+        num_samples: 500
+        lambda_: 0.005
+        z_reg_coeff: 0
+  probing:
+    visualize_probing: true
+    probe_mpc: false
+    probe_encoder: false
+    probe_wall: false
+    epochs: 20
+    epochs_enc: 30
+    full_finetune: false
+    lr: 0.0002
+    probe_targets: "locations"
+    locations:
+      arch: '512'
+    schedule: Constant
+    l1_depth: *n_steps
+    sample_timesteps: 30
+quick_debug: false
+run_name: test
+run_project: HJEPA-wall
+seed: 1
+wandb: true
