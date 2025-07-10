@@ -4,18 +4,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export LEADERBOARD_ROOT="$SCRIPT_DIR/Leaderboard"
 export TEAM_CODE_ROOT="$SCRIPT_DIR/agents"
+export SIMULATOR_ROOT="$SCRIPT_DIR/LunarSimulator"
 
 export PYTHONPATH="$LEADERBOARD_ROOT:$TEAM_CODE_ROOT:$PYTHONPATH"
 
 export TEAM_AGENT="$SCRIPT_DIR/data_collection_agent.py"
 
 # Set up cleanup trap
-trap 'echo "🧹 Cleaning up temporary files..."; rm -f "$SCRIPT_DIR"/temp_mission_*.xml; exit' INT TERM EXIT
+trap 'echo "🧹 Cleaning up temporary files and stopping simulator..."; rm -f "$SCRIPT_DIR"/temp_mission_*.xml; stop_simulator; exit' INT TERM EXIT
 
 export MISSIONS="$LEADERBOARD_ROOT/data/missions_training.xml"
 export MISSIONS_SUBSET="0"
-
-
 
 export REPETITIONS="1"
 
@@ -38,6 +37,131 @@ AVAILABLE_MAPS=("Moon_Map_01" "Moon_Map_02")
 # Map-specific preset ranges
 MOON_MAP_01_PRESETS=("0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "10")
 MOON_MAP_02_PRESETS=("11" "12" "13")
+
+# Global variable to track simulator process
+SIMULATOR_PID=""
+
+# Function to find the actual simulator process
+find_simulator_process() {
+    # Look for the actual LAC-Linux-Shipping process
+    local simulator_pid=$(pgrep -f "LAC-Linux-Shipping" | head -1)
+    if [ -n "$simulator_pid" ]; then
+        echo "$simulator_pid"
+        return 0
+    fi
+    
+    # Fallback: look for UE4Editor process
+    local ue4_pid=$(pgrep -f "UE4Editor" | head -1)
+    if [ -n "$ue4_pid" ]; then
+        echo "$ue4_pid"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to check if simulator is actually running
+check_simulator_running() {
+    local pid="$1"
+    
+    echo "🔍 Checking simulator process (PID: $pid)..."
+    
+    # Check if process exists
+    if ! kill -0 $pid 2>/dev/null; then
+        echo "❌ Process $pid does not exist"
+        return 1
+    fi
+    
+    # Check what process name we actually have
+    local process_name=$(ps -p $pid -o comm= 2>/dev/null)
+    echo "📋 Process name: '$process_name'"
+    
+    # Check if it's actually the simulator process (not a zombie)
+    # Handle truncated process names (LAC-Linux-Shipp vs LAC-Linux-Shipping)
+    if ! ps -p $pid -o comm= | grep -q "LAC-Linux-Shipp\|UE4Editor\|bash"; then
+        echo "❌ Process is not a simulator process"
+        return 1
+    fi
+    
+    echo "✅ Simulator process is running correctly"
+    return 0
+}
+
+# Function to start the simulator
+start_simulator() {
+    echo "🚀 Starting Lunar Simulator..."
+    
+    # Kill any existing simulator processes more aggressively
+    stop_simulator
+    
+    # Additional cleanup - kill any remaining UE4 or LAC processes
+    pkill -f "UE4Editor" 2>/dev/null || true
+    pkill -f "LAC-Linux-Shipping" 2>/dev/null || true
+    pkill -f "LAC.sh" 2>/dev/null || true
+    
+    # Wait a moment for processes to fully terminate
+    sleep 2
+    
+    # Start the simulator in background
+    bash "$SIMULATOR_ROOT/LAC.sh" > /dev/null 2>&1 &
+    local bash_pid=$!
+    
+    echo "🚀 Started simulator bash script with PID: $bash_pid"
+    
+    # Wait for simulator to initialize
+    echo "⏳ Waiting for simulator to initialize..."
+    sleep 20
+    
+    # Find the actual simulator process
+    SIMULATOR_PID=$(find_simulator_process)
+    if [ -z "$SIMULATOR_PID" ]; then
+        echo "❌ Could not find actual simulator process"
+        return 1
+    fi
+    
+    echo "🎯 Found actual simulator process with PID: $SIMULATOR_PID"
+    
+    # Debug: show what processes are running
+    echo "🔍 Checking what processes are running..."
+    ps aux | grep -E "(LAC|UE4|bash.*LAC)" | grep -v grep || echo "No LAC/UE4 processes found"
+    
+    # Check if simulator is actually running properly
+    if check_simulator_running $SIMULATOR_PID; then
+        echo "✅ Simulator started successfully (PID: $SIMULATOR_PID)"
+        return 0
+    else
+        echo "❌ Failed to start simulator or simulator crashed"
+        return 1
+    fi
+}
+
+# Function to stop the simulator
+stop_simulator() {
+    if [ -n "$SIMULATOR_PID" ] && kill -0 $SIMULATOR_PID 2>/dev/null; then
+        echo "🛑 Stopping simulator (PID: $SIMULATOR_PID)..."
+        kill $SIMULATOR_PID
+        sleep 2
+        
+        # Force kill if still running
+        if kill -0 $SIMULATOR_PID 2>/dev/null; then
+            echo "🛑 Force killing simulator..."
+            kill -9 $SIMULATOR_PID
+            sleep 1
+        fi
+        
+        wait $SIMULATOR_PID 2>/dev/null
+        echo "✅ Simulator stopped"
+    fi
+    
+    # Kill any remaining LAC processes more aggressively
+    echo "🧹 Cleaning up any remaining simulator processes..."
+    pkill -f "LAC-Linux-Shipping" 2>/dev/null || true
+    pkill -f "UE4Editor" 2>/dev/null || true
+    pkill -f "LAC.sh" 2>/dev/null || true
+    
+    # Wait for processes to fully terminate
+    sleep 3
+}
 
 # Function to create a dynamic mission file for specific map/preset
 create_mission_file() {
@@ -165,7 +289,7 @@ run_leaderboard() {
 }
 
 # Main continuous execution loop
-echo "🔄 Starting continuous data collection..."
+echo "🔄 Starting continuous data collection with integrated simulator..."
 echo "📁 Data will be saved to: $SCRIPT_DIR/data_collection"
 echo "⏹️  Press Ctrl+C to stop at any time"
 echo ""
@@ -176,9 +300,26 @@ while should_continue; do
     echo "🔄 Continuous Data Collection - Attempt $attempt"
     echo "🔄 ========================================="
     
+    # Start simulator for this mission
+    if ! start_simulator; then
+        echo "❌ Failed to start simulator. Retrying in 15 seconds..."
+        sleep 15
+        if ! start_simulator; then
+            echo "❌ Failed to start simulator twice. Retrying one more time in 30 seconds..."
+            sleep 30
+            if ! start_simulator; then
+                echo "❌ Failed to start simulator three times. Exiting."
+                exit 1
+            fi
+        fi
+    fi
+    
     # Run the leaderboard
     run_leaderboard $attempt
     exit_code=$?
+    
+    # Stop simulator after mission
+    stop_simulator
     
     if [ $exit_code -eq 0 ]; then
         echo "✅ Leaderboard completed successfully!"
@@ -187,22 +328,6 @@ while should_continue; do
     else
         echo "⚠️  Leaderboard detected failure (exit code: $exit_code)"
         echo "🔄 This is expected for collision/boundary violations - restarting..."
-        
-        # Initialize simulator before restarting
-        echo "🚀 Initializing Lunar Simulator before restart..."
-        bash "$SCRIPT_DIR/RunLunarSimulator.sh" &
-        simulator_pid=$!
-        
-        # Wait a bit for simulator to start up
-        echo "⏳ Waiting for simulator to initialize..."
-        sleep 10
-        
-        # Kill the simulator process (it will be restarted by the leaderboard)
-        if kill -0 $simulator_pid 2>/dev/null; then
-            echo "🛑 Stopping simulator process before restart..."
-            kill $simulator_pid
-            wait $simulator_pid 2>/dev/null
-        fi
         
         # Small delay before restarting
         echo "⏳ Waiting 5 seconds before restart..."
