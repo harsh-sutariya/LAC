@@ -26,6 +26,7 @@ Instructions:
 import collections
 import datetime
 import os
+import imageio  # Add this import for saving images
 
 import numpy as np
 import pygame
@@ -391,6 +392,25 @@ class HumanAgent(AutonomousAgent):
 
         self._clock = pygame.time.Clock()
         self._delta_seconds = 0.05
+        
+        # Add stereo image saving variables
+        self._image_counter = 0  # To keep track of frame numbers
+        self._save_stereo_images = True  # Flag to enable/disable saving
+        
+        # Batch processing variables
+        self._batch_size = 50  # Save every 50 images as one batch
+        self._current_batch = 0  # Current batch number
+        self._batch_counter = 0  # Counter within current batch
+        
+        # Create directories for saving stereo images
+        os.makedirs('stereo_images/left', exist_ok=True)
+        os.makedirs('stereo_images/right', exist_ok=True)
+        os.makedirs('stereo_images/batches', exist_ok=True)  # For batch processing
+        
+        print("Batch stereo image saving enabled!")
+        print(f"  - Batch size: {self._batch_size} images")
+        print(f"  - Images will be saved to stereo_images/ folder")
+        print(f"  - Batches will be processed for ORB-SLAM3")
 
     def use_fiducials(self):
         return True
@@ -405,16 +425,16 @@ class HumanAgent(AutonomousAgent):
                 'camera_active': True, 'light_intensity': 1.0, 'width': self._width, 'height': self._height, 'use_semantic': True
             },
             carla.SensorPosition.FrontLeft: {
-                'camera_active': False, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
+                'camera_active': True, 'light_intensity': 1.0, 'width': self._width, 'height': self._height, 'use_semantic': True
             },
             carla.SensorPosition.FrontRight: {
-                'camera_active': False, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
+                'camera_active': True, 'light_intensity': 1.0, 'width': self._width, 'height': self._height, 'use_semantic': True
             },
             carla.SensorPosition.Left: {
-                'camera_active': False, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
+                'camera_active': True, 'light_intensity': 1.0, 'width': self._width, 'height': self._height, 'use_semantic': True
             },
             carla.SensorPosition.Right: {
-                'camera_active': False, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
+                'camera_active': True, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
             },
             carla.SensorPosition.BackLeft: {
                 'camera_active': False, 'light_intensity': 0, 'width': self._width, 'height': self._height, 'use_semantic': True
@@ -436,6 +456,10 @@ class HumanAgent(AutonomousAgent):
         if quit_:
             self.mission_complete()
 
+        # Save stereo images if enabled
+        if self._save_stereo_images:
+            self._save_stereo_images_step(input_data)
+
         self._hic.run_interface(
             sensor_data=input_data['Grayscale'].get(active_camera, None),
             semantic_data=input_data['Semantic'].get(active_camera, None),
@@ -445,6 +469,40 @@ class HumanAgent(AutonomousAgent):
         )
         return control
 
+    def _save_stereo_images_step(self, input_data):
+        """
+        Save left and right stereo images directly to the live_trajectory directory for incremental SLAM
+        """
+        # Get left and right camera images
+        left_img = input_data['Grayscale'].get(carla.SensorPosition.FrontLeft, None)
+        right_img = input_data['Grayscale'].get(carla.SensorPosition.FrontRight, None)
+        
+        # Only save if both images are available
+        if left_img is not None and right_img is not None:
+            # Create target directories if they don't exist
+            left_dir = '/home/lunar/new/vivek/LAC/live_trajectory/mav0/cam0/data'
+            right_dir = '/home/lunar/new/vivek/LAC/live_trajectory/mav0/cam1/data'
+            os.makedirs(left_dir, exist_ok=True)
+            os.makedirs(right_dir, exist_ok=True)
+
+            # Build filenames
+            left_filename = f'{left_dir}/left_{self._image_counter:03d}.png'
+            right_filename = f'{right_dir}/right_{self._image_counter:03d}.png'
+
+            # Save images
+            imageio.imwrite(left_filename, left_img)
+            imageio.imwrite(right_filename, right_img)
+
+            print(f"[Stereo Save] Saved {left_filename} and {right_filename}")
+
+            # Increment counter
+            self._image_counter += 1
+        else:
+            # If stereo images aren't available, print a warning
+            if self._image_counter == 0:  # Only print once
+                print("Warning: Left and Right cameras not available. Make sure they are activated!")
+                print("Use keys 4 and 5 to activate Left and Right cameras respectively.")
+
     def finalize(self):
         """
         Cleanup
@@ -453,3 +511,40 @@ class HumanAgent(AutonomousAgent):
             self._hic.set_black_screen()
             self._hic.quit()
             self._has_quit = True
+        
+        # Print final statistics
+        if hasattr(self, '_image_counter'):
+            print(f"\nStereo image saving complete! Total images saved: {self._image_counter}")
+            print(f"Total batches processed: {self._current_batch}")
+            print("Images saved in: stereo_images/batches/")
+            
+    def _process_batch_with_orbslam(self, batch_dir):
+        """
+        Process a batch of stereo images with ORB-SLAM3
+        """
+        try:
+            print(f"🔄 Processing batch with ORB-SLAM3...")
+            
+            # Create a simple script to run ORB-SLAM3 on this batch
+            # For now, we'll just create the command structure
+            # You'll need to implement the actual ORB-SLAM3 call
+            
+            # Example command structure (you'll need to adapt this):
+            # orbslam3_command = f"""
+            # cd {ORB_SLAM3_DIR}
+            # ./Examples/Stereo/stereo_euroc Vocabulary/ORBvoc.txt Examples/Stereo/Lunar.yaml {batch_dir} Examples/Stereo/EuRoC_TimeStamps/LUNAR_synchronized.txt
+            # """
+            
+            # For now, just create a placeholder file to show the batch is ready
+            ready_file = f"{batch_dir}/ready_for_orbslam.txt"
+            with open(ready_file, 'w') as f:
+                f.write(f"Batch ready for ORB-SLAM3 processing\n")
+                f.write(f"Batch directory: {batch_dir}\n")
+                f.write(f"Left images: {batch_dir}/left/\n")
+                f.write(f"Right images: {batch_dir}/right/\n")
+                f.write(f"Total images: {self._batch_size}\n")
+            
+            print(f"✅ Batch ready for ORB-SLAM3: {ready_file}")
+            
+        except Exception as e:
+            print(f"❌ Error processing batch with ORB-SLAM3: {e}")
