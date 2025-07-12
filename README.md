@@ -26,6 +26,7 @@ LunarAutonomyChallenge/
 │   └── raft.py                 # Advanced RAFT-Stereo agent
 ├── Leaderboard/                # Evaluation framework
 ├── LunarSimulator/             # CARLA-based lunar simulation
+├── ORB_SLAM3/                  # ORB-SLAM3 submodule for SLAM functionality
 ├── models/                     # Pre-trained neural network weights
 ├── docs/                       # Documentation and fiducials
 ├── docker/                     # Docker configuration files
@@ -33,6 +34,29 @@ LunarAutonomyChallenge/
 ```
 
 ## Quick Start
+
+### 0. Clone Repository with Submodules
+
+**⚠️ Important:** This repository contains submodules (ORB-SLAM3). Use one of these methods to clone:
+
+**Method 1: Clone with submodules (Recommended)**
+```bash
+git clone --recursive https://github.com/[your-username]/LunarAutonomyChallenge.git
+cd LunarAutonomyChallenge
+```
+
+**Method 2: Clone then initialize submodules**
+```bash
+git clone https://github.com/[your-username]/LunarAutonomyChallenge.git
+cd LunarAutonomyChallenge
+git submodule update --init --recursive
+```
+
+**Method 3: If you already cloned without submodules**
+```bash
+cd LunarAutonomyChallenge
+git submodule update --init --recursive
+```
 
 ### 1. Create Conda Environment
 
@@ -43,7 +67,27 @@ conda env create -f environment.yaml
 conda activate lunar-autonomy
 ```
 
-### 2. Launch Lunar Simulator
+### 2. Build ORB-SLAM3 (Optional)
+
+If you plan to use SLAM functionality, build the ORB-SLAM3 submodule:
+
+```bash
+cd ORB_SLAM3
+# Install dependencies (see Dependencies.md in ORB_SLAM3 folder)
+chmod +x build.sh
+./build.sh
+
+# For ROS support (optional)
+chmod +x build_ros.sh
+./build_ros.sh
+
+cd ..
+```
+
+**Note:** ORB-SLAM3 has its own dependencies (OpenCV, Eigen3, Pangolin, etc.). 
+Check `ORB_SLAM3/Dependencies.md` for detailed installation instructions.
+
+### 3. Launch Lunar Simulator
 
 Start the CARLA-based lunar simulation environment:
 
@@ -57,7 +101,7 @@ This will:
 - Set up sensor configurations
 - Prepare the rover for autonomous navigation
 
-### 3. Run Leaderboard Evaluation
+### 4. Run Leaderboard Evaluation
 
 Execute the autonomous navigation challenge:
 
@@ -177,7 +221,219 @@ conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvi
 - Limit obstacle list size
 - Configure garbage collection intervals
 
+## Building ORB-SLAM3 Examples
+
+### Prerequisites and Dependencies
+
+To successfully build all ORB-SLAM3 examples, you'll need to install several dependencies beyond those listed in the ORB-SLAM3 documentation:
+
+#### Required System Dependencies
+```bash
+# Update system packages
+sudo apt update
+
+# Install basic development tools
+sudo apt install -y build-essential cmake git
+
+# Install OpenCV and computer vision libraries
+sudo apt install -y libopencv-dev
+
+# Install Eigen3 for mathematical operations
+sudo apt install -y libeigen3-dev
+
+# Install OpenGL and graphics libraries
+sudo apt install -y libgl1-mesa-dev libglew-dev
+
+# Install ncurses libraries (crucial for examples)
+sudo apt install -y libncurses-dev libncursesw5-dev libtinfo-dev
+
+# Install additional dependencies
+sudo apt install -y libjpeg-dev libpng-dev libtiff-dev libavcodec-dev libavformat-dev libswscale-dev libv4l-dev libxvidcore-dev libx264-dev libgtk-3-dev libatlas-base-dev gfortran python3-dev
+```
+
+#### Pangolin Installation
+
+Pangolin is required for visualization. Install a compatible version:
+
+```bash
+# Install Pangolin v0.6 (compatible version)
+cd /tmp
+git clone https://github.com/stevenlovegrove/Pangolin.git
+cd Pangolin
+git checkout v0.6
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-copy -Wno-error" ..
+make -j4
+sudo make install
+sudo ldconfig
+```
+
+#### CMakeLists.txt Configuration
+
+The ORB-SLAM3 CMakeLists.txt needs to be updated to properly link all required libraries. The following modifications are automatically applied:
+
+```cmake
+# Add OpenGL and GLEW finding
+find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
+
+# Update library linking to include all required libraries
+target_link_libraries(${PROJECT_NAME}
+${OpenCV_LIBS}
+${EIGEN3_LIBS}
+${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
+${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
+${OPENGL_LIBRARIES}
+${GLEW_LIBRARIES}
+-lboost_serialization
+-lcrypto
+-lncursesw
+-ltinfo
+-lffi
+)
+```
+
+### Building Process
+
+1. **Navigate to ORB-SLAM3 directory:**
+```bash
+cd ORB_SLAM3
+```
+
+2. **Run the build script:**
+```bash
+chmod +x build.sh
+./build.sh
+```
+
+3. **Or build manually:**
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j4
+```
+
+### Troubleshooting Common Issues
+
+#### 1. Pangolin Not Found Error
+```
+Could not find required component: Pangolin
+```
+**Solution:** Install Pangolin v0.6 as shown above. Newer versions may have compatibility issues.
+
+#### 2. OpenGL/GLEW Linking Errors
+```
+undefined reference to `glXXXX`
+```
+**Solution:** Install OpenGL and GLEW development packages and ensure they're properly linked in CMakeLists.txt.
+
+#### 3. ncurses Linking Errors
+```
+undefined reference to `mousemask@NCURSESW6_5.1.20000708`
+```
+**Solution:** Install ncurses wide character libraries:
+```bash
+sudo apt install -y libncursesw5-dev libtinfo-dev
+```
+
+#### 4. G2O/Eigen Warnings
+```
+warning: 'Eigen::AlignedBit' is deprecated
+```
+**Solution:** These are warnings from using newer Eigen versions. They don't affect functionality.
+
+### Built Examples
+
+After successful compilation, you'll have these executables:
+
+#### **Main Library**
+- `lib/libORB_SLAM3.so` - Main SLAM library
+
+#### **Monocular SLAM Examples**
+- `Examples/Monocular/mono_euroc` - EuRoC dataset monocular SLAM
+- `Examples/Monocular/mono_kitti` - KITTI dataset monocular SLAM
+- `Examples/Monocular/mono_tum` - TUM dataset monocular SLAM
+- `Examples/Monocular/mono_tum_vi` - TUM-VI dataset monocular SLAM
+
+#### **Monocular-Inertial SLAM Examples**
+- `Examples/Monocular-Inertial/mono_inertial_euroc` - EuRoC dataset with IMU
+- `Examples/Monocular-Inertial/mono_inertial_tum_vi` - TUM-VI dataset with IMU
+
+#### **RGB-D SLAM Examples**
+- `Examples/RGB-D/rgbd_tum` - TUM RGB-D dataset
+
+#### **Stereo SLAM Examples**
+- `Examples/Stereo/stereo_euroc` - EuRoC stereo dataset
+- `Examples/Stereo/stereo_euroc_foundationstereo` - EuRoC with FoundationStereo
+- `Examples/Stereo/stereo_kitti` - KITTI stereo dataset
+- `Examples/Stereo/stereo_tum_vi` - TUM-VI stereo dataset
+
+#### **Stereo-Inertial SLAM Examples**
+- `Examples/Stereo-Inertial/stereo_inertial_euroc` - EuRoC stereo with IMU
+- `Examples/Stereo-Inertial/stereo_inertial_tum_vi` - TUM-VI stereo with IMU
+
+#### **Testing Examples**
+- `Examples/test_foundationstereo_slam` - FoundationStereo testing
+- `Examples/test_stereo_disparity` - Stereo disparity testing
+
+### Usage Examples
+
+```bash
+# Run monocular SLAM on TUM dataset
+./Examples/Monocular/mono_tum Vocabulary/ORBvoc.txt Examples/Monocular/TUM1.yaml PATH_TO_SEQUENCE
+
+# Run stereo SLAM on EuRoC dataset
+./Examples/Stereo/stereo_euroc Vocabulary/ORBvoc.txt Examples/Stereo/EuRoC.yaml PATH_TO_SEQUENCE/cam0/data PATH_TO_SEQUENCE/cam1/data Examples/Stereo/EuRoC_TimeStamps/SEQUENCE.txt
+
+# Run stereo-inertial SLAM
+./Examples/Stereo-Inertial/stereo_inertial_euroc Vocabulary/ORBvoc.txt Examples/Stereo-Inertial/EuRoC.yaml PATH_TO_SEQUENCE/cam0/data PATH_TO_SEQUENCE/cam1/data Examples/Stereo-Inertial/EuRoC_TimeStamps/SEQUENCE.txt Examples/Stereo-Inertial/EuRoC_IMU/SEQUENCE.txt
+```
+
+### Performance Notes
+
+- **Build time:** ~10-15 minutes on a modern system
+- **Storage:** ~500MB for complete build
+- **Memory:** 4GB+ RAM recommended during compilation
+- **Dependencies:** All resolved through standard Ubuntu repositories
+
 ## Development
+
+### Working with Submodules
+
+This project includes ORB-SLAM3 as a git submodule. Here's how to work with it:
+
+**Updating the submodule to latest changes:**
+```bash
+cd ORB_SLAM3
+git pull origin main  # or master, depending on default branch
+cd ..
+git add ORB_SLAM3
+git commit -m "Update ORB_SLAM3 submodule"
+```
+
+**Making changes to ORB-SLAM3:**
+```bash
+# Work inside the submodule
+cd ORB_SLAM3
+# Make your changes, commit them
+git add .
+git commit -m "Your changes to ORB_SLAM3"
+git push origin main  # Push to your fork
+
+# Update parent repository to track the new commit
+cd ..
+git add ORB_SLAM3
+git commit -m "Update ORB_SLAM3 submodule to latest changes"
+```
+
+**Switching ORB-SLAM3 to a different branch:**
+```bash
+cd ORB_SLAM3
+git checkout feature-branch
+cd ..
+git add ORB_SLAM3
+git commit -m "Switch ORB_SLAM3 to feature-branch"
+```
 
 ### Adding New Agents
 

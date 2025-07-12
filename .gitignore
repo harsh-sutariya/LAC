@@ -226,3 +226,11 @@ credentials.json
 # Generated documentation
 docs/_build/
 *.pdf
+
+# Data collection
+data_collection/
+plan.md
+
+# Analysis
+analysis_plots/
+imu_autoencoder_results/
