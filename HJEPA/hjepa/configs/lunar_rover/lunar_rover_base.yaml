@@ -8,7 +8,7 @@ data:
   min_max_normalize_state: false
   dataset_type: LunarRover
   lunar_rover_config:
-    data_dir: "data_collection"  # Path to your lunar rover data
+    data_dir: "../data_collection"  # Path to your lunar rover data
     batch_size: 32
     n_steps: *n_steps
     img_size: 256
@@ -37,8 +37,8 @@ hjepa:
     backbone:
       arch: lunar_rover
       # Pretrained model paths
-      imu_encoder_path: "imu-pretraining/imu_autoencoder_results/imu_autoencoder_latent32.pth"
-      imu_scaler_path: "imu-pretraining/imu_autoencoder_results/imu_scaler.pkl"
+      imu_encoder_path: "../imu-pretraining/imu_autoencoder_results/imu_autoencoder_latent32.pth"
+      imu_scaler_path: "../imu-pretraining/imu_autoencoder_results/imu_scaler.pkl"
       image_size: [256, 256]
       freeze_vision_encoder: true  # Keep SD VAE frozen
       freeze_imu_encoder: true     # Keep IMU encoder frozen
