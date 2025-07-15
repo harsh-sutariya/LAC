@@ -129,7 +129,7 @@ imu-pretraining/imu_autoencoder_results/
 # Captured data
 captured_images/
 captured_data/
-data/
+# data/
 dataset/
 datasets/
 

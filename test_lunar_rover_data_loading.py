@@ -15,7 +15,9 @@ import numpy as np
 from pathlib import Path
 
 # Add HJEPA to Python path
-sys.path.insert(0, 'HJEPA')
+current_dir = os.path.dirname(os.path.abspath(__file__))
+hjepa_path = os.path.join(current_dir, 'HJEPA')
+sys.path.insert(0, hjepa_path)
 
 from hjepa.data.lunar_rover import LunarRoverDataset, LunarRoverDatasetConfig
 from hjepa.models.encoders.lunar_rover import LunarRoverEncoder
