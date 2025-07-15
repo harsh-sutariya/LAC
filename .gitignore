@@ -99,7 +99,7 @@ dmypy.json
 .pyre/
 
 # Model weights and checkpoints
-models/
+# models/
 *.pt
 *.pth
 *.ckpt
